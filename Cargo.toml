@@ -2,6 +2,7 @@
 name = "lific"
 version = "2.11.1"
 edition = "2024"
+publish = false
 description = "Local-first, lightweight issue tracker. Single binary, SQLite-backed, MCP-native."
 license = "Apache-2.0"
 repository = "https://github.com/VoidNullable/lific"
@@ -45,9 +46,8 @@ axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br"] }
-# HTTP client — used by `lific doctor` to probe a running server (reachability,
-# OAuth discovery, MCP round-trip). rustls-tls (no OpenSSL linkage) so the
-# static single-binary build stays clean and `public_url` https checks work.
+# HTTP client for loopback-only CLI, diagnostics, login, and MCP transport.
+# All production clients use src/network.rs (no proxies or redirects).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # Database

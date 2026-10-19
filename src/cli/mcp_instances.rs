@@ -1779,6 +1779,10 @@ fn read_config(path: &Path) -> Result<String, String> {
 pub async fn run(path: &Path) -> Result<(), Box<dyn Error>> {
     let config = parse_instances(&read_config(path)?)?;
 
+    for spec in &config.instances {
+        crate::network::local_url(&spec.url)?;
+    }
+
     // Credentials first, and independently: an alias whose token is missing
     // fails the launch rather than silently answering every call with 401.
     let mut credentials: Vec<Option<String>> = Vec::with_capacity(config.instances.len());
@@ -1795,12 +1799,12 @@ pub async fn run(path: &Path) -> Result<(), Box<dyn Error>> {
         // One client per alias. Redirects refused, so a bearer token is never
         // replayed to a Location the backend picked; cookies off by default,
         // so no state crosses aliases.
-        let client = reqwest::Client::builder()
+        let client = crate::network::client()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(CALL_TIMEOUT)
             .build()?;
-        let discovery_client = reqwest::Client::builder()
+        let discovery_client = crate::network::client()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(DISCOVERY_TIMEOUT)

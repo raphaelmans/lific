@@ -14,15 +14,12 @@
 //! tested against fixture JSON; the network lives behind [`GithubFetcher`].
 
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use std::io::Read;
 
 use super::{NormalizedComment, NormalizedIssue, NormalizedLabel, StatusMap};
 use crate::db::models::{Priority, Status};
 
 pub const MAX_GITHUB_ISSUES: usize = 10_000;
 pub const MAX_GITHUB_COMMENTS_PER_ISSUE: usize = 1_000;
-pub const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GITHUB_NORMALIZED_BYTES: usize = 128 * 1024 * 1024;
 
 /// Which deliberate ceiling an import ran into.
@@ -38,8 +35,10 @@ pub enum GithubLimit {
     /// One issue carries more comments than Lific will import.
     CommentsPerIssue { issue_number: i64, max: usize },
     /// A single GitHub response body was larger than we will buffer.
+    #[cfg(test)]
     ResponseBytes { label: &'static str, max: usize },
     /// A single page returned more items than GitHub's own `per_page` allows.
+    #[cfg(test)]
     PageItems { label: &'static str, max: usize },
     /// The normalized issues retained in memory outgrew the import budget.
     NormalizedBytes { max: usize },
@@ -55,9 +54,11 @@ impl std::fmt::Display for GithubLimit {
                 f,
                 "GitHub issue #{issue_number} has too many comments (more than {max})"
             ),
+            #[cfg(test)]
             GithubLimit::ResponseBytes { label, max } => {
                 write!(f, "GitHub {label} response exceeds the {max} byte limit")
             }
+            #[cfg(test)]
             GithubLimit::PageItems { label, max } => write!(
                 f,
                 "GitHub {label} response exceeds the per-page limit of {max} items"
@@ -165,13 +166,6 @@ impl StateFilter {
             "closed" => Ok(StateFilter::Closed),
             "all" => Ok(StateFilter::All),
             other => Err(format!("invalid --state '{other}' (open|closed|all)")),
-        }
-    }
-    pub fn as_query(&self) -> &'static str {
-        match self {
-            StateFilter::Open => "open",
-            StateFilter::Closed => "closed",
-            StateFilter::All => "all",
         }
     }
 }
@@ -371,6 +365,7 @@ fn normalized_retained_bytes(issue: &NormalizedIssue) -> usize {
 
 /// Parse the RFC 5988 `Link` header to decide whether a next page exists.
 /// GitHub returns `<...&page=2>; rel="next", <...&page=9>; rel="last"`.
+#[cfg(test)]
 pub fn has_next_page(link_header: Option<&str>) -> bool {
     match link_header {
         Some(h) => h.split(',').any(|part| part.contains("rel=\"next\"")),
@@ -378,175 +373,33 @@ pub fn has_next_page(link_header: Option<&str>) -> bool {
     }
 }
 
-/// Live fetcher over the blocking reqwest client already in the tree.
-pub struct LiveGithub {
-    client: reqwest::blocking::Client,
-    owner: String,
-    repo: String,
-    token: Option<String>,
-}
-
+/// Compatibility stub: this fork has no external import transport.
+pub struct LiveGithub;
 impl LiveGithub {
     pub fn new(
-        owner: &str,
-        repo: &str,
-        token: Option<String>,
-    ) -> Result<LiveGithub, GithubImportError> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("lific-import/1.0")
-            .build()
-            .map_err(|e| GithubImportError::Internal(format!("http client init failed: {e}")))?;
-        Ok(LiveGithub {
-            client,
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-            token,
-        })
-    }
-
-    fn get(&self, url: &str) -> Result<reqwest::blocking::Response, GithubImportError> {
-        let mut req = self
-            .client
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(t) = &self.token {
-            req = req.header("Authorization", format!("Bearer {t}"));
-        }
-        let resp = req
-            .send()
-            .map_err(|e| GithubImportError::Upstream(format!("request failed: {e}")))?;
-        // Respect the rate-limit budget: if we're out, surface a clear error
-        // rather than hammering. GitHub sets X-RateLimit-Remaining: 0 and a
-        // reset epoch when throttled (HTTP 403).
-        if resp.status().as_u16() == 403 {
-            if let Some(rem) = resp
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                && rem == "0"
-            {
-                let reset = resp
-                    .headers()
-                    .get("x-ratelimit-reset")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("soon");
-                return Err(GithubImportError::Upstream(format!(
-                    "GitHub rate limit exhausted; resets at epoch {reset}. \
-                     Provide a token (--token / GITHUB_TOKEN) for a higher budget."
-                )));
-            }
-            return Err(GithubImportError::Upstream(
-                "GitHub returned 403 (forbidden) — check token permissions".into(),
-            ));
-        }
-        if resp.status().as_u16() == 401 {
-            return Err(GithubImportError::Upstream(
-                "GitHub authentication failed — check your token".into(),
-            ));
-        }
-        if resp.status().as_u16() == 404 {
-            return Err(GithubImportError::Upstream(format!(
-                "repo {}/{} not found (or private and token lacks access)",
-                self.owner, self.repo
-            )));
-        }
-        if !resp.status().is_success() {
-            return Err(GithubImportError::Upstream(format!(
-                "GitHub returned HTTP {}",
-                resp.status()
-            )));
-        }
-        Ok(resp)
-    }
-
-    fn json_bounded<T: DeserializeOwned>(
-        resp: reqwest::blocking::Response,
-        label: &'static str,
-    ) -> Result<T, GithubImportError> {
-        let mut bytes = Vec::new();
-        let mut reader = resp.take((MAX_GITHUB_RESPONSE_BYTES + 1) as u64);
-        reader.read_to_end(&mut bytes).map_err(|e| {
-            GithubImportError::Upstream(format!("failed to read GitHub {label} response: {e}"))
-        })?;
-        if bytes.len() > MAX_GITHUB_RESPONSE_BYTES {
-            return Err(GithubImportError::Limit(GithubLimit::ResponseBytes {
-                label,
-                max: MAX_GITHUB_RESPONSE_BYTES,
-            }));
-        }
-        serde_json::from_slice(&bytes).map_err(|e| {
-            GithubImportError::Upstream(format!("failed to parse GitHub {label} JSON: {e}"))
-        })
+        _owner: &str,
+        _repo: &str,
+        _token: Option<String>,
+    ) -> Result<Self, GithubImportError> {
+        Err(GithubImportError::Upstream(
+            crate::network::IMPORT_DISABLED.into(),
+        ))
     }
 }
-
 impl GithubFetcher for LiveGithub {
     fn fetch_issues_page(
         &self,
-        page: u32,
-        state: StateFilter,
+        _page: u32,
+        _state: StateFilter,
     ) -> Result<(Vec<GithubIssue>, bool), GithubImportError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/issues?state={}&per_page=100&page={page}",
-            self.owner,
-            self.repo,
-            state.as_query()
-        );
-        let resp = self.get(&url)?;
-        let link = resp
-            .headers()
-            .get("link")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let issues: Vec<GithubIssue> = Self::json_bounded(resp, "issues")?;
-        if issues.len() > 100 {
-            return Err(GithubImportError::Limit(GithubLimit::PageItems {
-                label: "issues",
-                max: 100,
-            }));
-        }
-        Ok((issues, has_next_page(link.as_deref())))
+        Err(GithubImportError::Upstream(
+            crate::network::IMPORT_DISABLED.into(),
+        ))
     }
-
-    fn fetch_comments(&self, issue_number: i64) -> Result<Vec<GithubComment>, GithubImportError> {
-        let mut all = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let url = format!(
-                "https://api.github.com/repos/{}/{}/issues/{issue_number}/comments?per_page=100&page={page}",
-                self.owner, self.repo
-            );
-            let resp = self.get(&url)?;
-            let link = resp
-                .headers()
-                .get("link")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let batch: Vec<GithubComment> = Self::json_bounded(resp, "comments")?;
-            if batch.len() > 100 {
-                return Err(GithubImportError::Limit(GithubLimit::PageItems {
-                    label: "comments",
-                    max: 100,
-                }));
-            }
-            if all.len() + batch.len() > MAX_GITHUB_COMMENTS_PER_ISSUE {
-                return Err(GithubImportError::Limit(GithubLimit::CommentsPerIssue {
-                    issue_number,
-                    max: MAX_GITHUB_COMMENTS_PER_ISSUE,
-                }));
-            }
-            all.extend(batch);
-            if !has_next_page(link.as_deref()) {
-                break;
-            }
-            page += 1;
-            if page > 100 {
-                break;
-            }
-        }
-        Ok(all)
+    fn fetch_comments(&self, _issue_number: i64) -> Result<Vec<GithubComment>, GithubImportError> {
+        Err(GithubImportError::Upstream(
+            crate::network::IMPORT_DISABLED.into(),
+        ))
     }
 }
 

@@ -14,7 +14,8 @@
     "sidebar": "bun sidebar.ts",
     "task-checkboxes": "bun task-checkboxes.ts",
     "cross-project-relations": "bun cross-project-relations.ts",
-    "issue-assignees": "bun issue-assignees.ts"
+    "issue-assignees": "bun issue-assignees.ts",
+    "local-only": "bun local-only.ts"
   },
   "devDependencies": {
     "playwright": "1.61.1"

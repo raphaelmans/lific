@@ -466,6 +466,7 @@ where
 /// `credential` is optional: an auth-optional instance takes requests with no
 /// `Authorization` header at all, so `None` sends none rather than failing.
 pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn Error>> {
+    crate::network::local_url(&url)?;
     // The same plaintext rule the HTTP CLI backend enforces (http.rs:92-101):
     // a bearer credential never crosses unencrypted http to a non-loopback
     // host. The proxy would otherwise be the one door that leaks it.
@@ -498,7 +499,7 @@ pub async fn run(url: String, credential: Option<String>) -> Result<(), Box<dyn 
 
     // Bounded, because a proxy that hangs forever on a dead remote looks to
     // the agent like a tracker that stopped answering, with no error to show.
-    let client = reqwest::Client::builder()
+    let client = crate::network::client()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
@@ -872,7 +873,7 @@ mod tests {
         let mut config = Config::default();
         config.database.path = db_path;
         config.auth.required = true;
-        config.server.public_url = Some("https://example.test".into());
+        config.server.public_url = Some("http://localhost".into());
         config.server.host = "127.0.0.1".into();
         let trusted_proxies =
             Arc::<[ratelimit::IpNetwork]>::from(config.server.trusted_proxy_ranges().unwrap());
@@ -897,7 +898,7 @@ mod tests {
                     axum::http::Request::builder()
                         .method("POST")
                         .uri("/mcp")
-                        .header("host", "example.test")
+                        .header("host", "localhost")
                         .header("authorization", format!("Bearer {key}"))
                         .header("content-type", "application/json")
                         .header("accept", "application/json, text/event-stream")

@@ -18,6 +18,7 @@ mod import;
 mod issue_refs;
 mod links;
 mod mcp;
+mod network;
 mod oauth;
 mod preview;
 mod project_archive;
@@ -483,6 +484,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
 
+    network::validate_server(&cfg)?;
+    if let Command::Start {
+        host: Some(host), ..
+    } = &cli.command
+    {
+        network::loopback_ip(host)?;
+    }
+
     // CLI overrides
     if let Some(ref db) = cli.db {
         cfg.database.path = db.clone();
@@ -496,6 +505,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let url = http_backend_url(cli.url.as_deref(), cfg.server.public_url.as_deref(), &cfg);
+        network::local_url(&url)?;
         // LIF-408: `--api-key`/`LIFIC_API_KEY` still wins, then the stored
         // credential for `url`. `credentials::load` will only hand back a
         // `LIFIC_TOKEN` when `LIFIC_URL` names the same origin as `url`, so a
@@ -507,6 +517,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
             .await
             .map_err(Into::into);
+    }
+
+    if matches!(cli.command, Command::Import { .. }) {
+        return Err(network::IMPORT_DISABLED.into());
     }
 
     // Only `lific init` creates a database. Checked once, here, after the HTTP
@@ -922,6 +936,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                      LIFIC_URL"
                         .into()
                 })?;
+            network::local_url(&url)?;
             let credential = cli::resolve_http_credential(cli.api_key.as_deref(), || {
                 cli::credentials::load(&url)
             })?;
@@ -1146,7 +1161,10 @@ fn http_backend_url(cli_url: Option<&str>, public_url: Option<&str>, cfg: &Confi
 }
 /// Poll `<base>/api/health` until it answers 200 or the deadline passes.
 async fn wait_healthy(base_url: &str, timeout: std::time::Duration) -> bool {
-    let client = match reqwest::Client::builder()
+    if network::local_url(base_url).is_err() {
+        return false;
+    }
+    let client = match network::client()
         .timeout(std::time::Duration::from_secs(2))
         .build()
     {
@@ -2051,8 +2069,8 @@ mod init_target_tests {
             .await
             .unwrap();
         assert_eq!(out["required"], serde_json::json!(true));
-        // host is left at its default (0.0.0.0) — password mode never binds loopback.
-        assert_eq!(out["host"], serde_json::json!("0.0.0.0"));
+        // Password mode retains the local-only default.
+        assert_eq!(out["host"], serde_json::json!("127.0.0.1"));
         assert_eq!(out["web_auto_login"], serde_json::json!(false));
         // Passworded admin can sign in.
         assert_eq!(out["admin"], serde_json::json!("blake"));

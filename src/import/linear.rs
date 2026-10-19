@@ -222,129 +222,16 @@ pub fn collect(
     Ok(out)
 }
 
-/// The GraphQL query used by the live fetcher. `first: 50` batches with nested
-/// label/comment connections to stay well under the ~1500 req/hr budget.
-pub const ISSUES_QUERY: &str = r#"
-query Issues($team: String!, $after: String) {
-  issues(
-    first: 50
-    after: $after
-    filter: { team: { key: { eq: $team } } }
-  ) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      identifier
-      title
-      description
-      priority
-      state { type }
-      assignee { name displayName }
-      estimate
-      labels { nodes { name color } }
-      comments { nodes { body createdAt user { name displayName } } }
-    }
-  }
-}
-"#;
-
-/// Live GraphQL fetcher over the blocking reqwest client.
-pub struct LiveLinear {
-    client: reqwest::blocking::Client,
-    token: String,
-    team: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlEnvelope {
-    #[serde(default)]
-    data: Option<GraphqlData>,
-    #[serde(default)]
-    errors: Option<Vec<GraphqlError>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlData {
-    issues: IssuesConnection,
-}
-
-#[derive(Debug, Deserialize)]
-struct IssuesConnection {
-    #[serde(rename = "pageInfo")]
-    page_info: PageInfo,
-    nodes: Vec<LinearIssue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PageInfo {
-    #[serde(rename = "hasNextPage")]
-    has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    end_cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlError {
-    message: String,
-}
-
+/// Compatibility stub: this fork has no external import transport.
+pub struct LiveLinear;
 impl LiveLinear {
-    pub fn new(team: &str, token: String) -> Result<LiveLinear, String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("lific-import/1.0")
-            .build()
-            .map_err(|e| format!("http client init failed: {e}"))?;
-        Ok(LiveLinear {
-            client,
-            token,
-            team: team.to_string(),
-        })
+    pub fn new(_team: &str, _token: String) -> Result<Self, String> {
+        Err(crate::network::IMPORT_DISABLED.into())
     }
 }
-
 impl LinearFetcher for LiveLinear {
-    fn fetch_page(&self, after: Option<&str>) -> Result<LinearPage, String> {
-        let body = serde_json::json!({
-            "query": ISSUES_QUERY,
-            "variables": { "team": self.team, "after": after },
-        });
-        let resp = self
-            .client
-            .post("https://api.linear.app/graphql")
-            .header("Authorization", &self.token)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .map_err(|e| format!("request failed: {e}"))?;
-        if resp.status().as_u16() == 401 || resp.status().as_u16() == 400 {
-            return Err("Linear authentication failed — check your API key".into());
-        }
-        if !resp.status().is_success() {
-            return Err(format!("Linear returned HTTP {}", resp.status()));
-        }
-        let env: GraphqlEnvelope = resp
-            .json()
-            .map_err(|e| format!("failed to parse Linear response: {e}"))?;
-        if let Some(errs) = env.errors
-            && !errs.is_empty()
-        {
-            return Err(format!(
-                "Linear GraphQL error: {}",
-                errs.into_iter()
-                    .map(|e| e.message)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
-        }
-        let data = env
-            .data
-            .ok_or_else(|| "Linear response had no data".to_string())?;
-        let next = if data.issues.page_info.has_next_page {
-            data.issues.page_info.end_cursor
-        } else {
-            None
-        };
-        Ok((data.issues.nodes, next))
+    fn fetch_page(&self, _after: Option<&str>) -> Result<LinearPage, String> {
+        Err(crate::network::IMPORT_DISABLED.into())
     }
 }
 

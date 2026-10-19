@@ -1,18 +1,11 @@
 name: Release
 
-# Triggered by pushing a version tag (e.g. v1.4.0).
-#
-# The maintainer cuts the tag locally from the version-bump commit and pushes
-# it here. Do NOT have this workflow create tags: keeping tag creation
-# human-driven means a release only ever fires from a deliberate act.
-#
-# Release ritual:
-#   1. bump Cargo.toml, commit, and push the version change (no release yet)
-#   2. `git tag vX.Y.Z && git push origin vX.Y.Z`     (fires this workflow)
+# Automatic upstream release publishing is disabled for this local-only fork.
+# The historical workflow is retained for review and can only be dispatched
+# explicitly against a version tag. Cargo publication is also disabled by
+# publish = false in Cargo.toml.
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_dispatch:
 
 permissions:
   contents: write

@@ -863,10 +863,8 @@
       <!-- Brand header -->
       <div class="px-3 pt-3 pb-2 flex items-center gap-1.5">
         <a
-          href="https://github.com/VoidNullable/lific"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="View Lific on GitHub"
+          href="/"
+          title="Lific — local only"
           class="sidebar-brand flex flex-1 min-w-0 items-center gap-2.5 px-1 py-1 transition-colors"
         >
           <img src="/logo.webp" alt="" width="26" height="26" class="rounded-md shrink-0" />

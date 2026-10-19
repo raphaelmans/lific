@@ -1,52 +1,63 @@
-<p align="center">
-  <img src="LificHero.png" alt="Lific: an issue tracker for prolific agents" width="800">
-</p>
+# Lific — local-only fork
 
-<p align="center">
-  <a href="https://github.com/VoidNullable/lific/actions/workflows/ci.yml"><img src="https://github.com/VoidNullable/lific/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://crates.io/crates/lific"><img src="https://img.shields.io/crates/v/lific" alt="crates.io"></a>
-  <a href="https://github.com/VoidNullable/lific/releases"><img src="https://img.shields.io/github/v/release/VoidNullable/lific" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/VoidNullable/lific" alt="License"></a>
-  <a href="https://discord.gg/uWvaFC4f7D"><img src="https://img.shields.io/discord/1516612377196363889?logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
-</p>
+A private, SQLite-backed issue tracker for use on one laptop. The web UI is embedded in the binary. This fork enforces loopback-only networking; remote server connections and external imports are disabled.
 
-<p align="center">
-  <strong>An issue tracker for prolific agents.</strong><br>
-  One binary. One SQLite file. MCP built in.
-</p>
+Before changing this fork or bringing in upstream updates, read [MUST_README.md](MUST_README.md) for the fork requirements, merge pipeline, and acceptance checks.
 
-<p align="center">
-  <a href="https://lific.dev"><strong>lific.dev</strong></a>
-  &nbsp;·&nbsp;
-  <a href="https://lific.dev/docs">Docs</a>
-  &nbsp;·&nbsp;
-  <a href="https://discord.gg/uWvaFC4f7D">Discord</a>
-</p>
+## Build and run this fork
 
----
-
-Plans and issues live on your server instead of in the context window, so work outlives the session. Agents use it over MCP; you use the web UI.
-
-- **31 MCP tools in 5,781 tokens**, about one long file read.
-- **One 25 to 32 MB binary** with SQLite, the web UI and backups built in. No Docker, no Postgres.
-- **`lific connect` writes MCP config for 11 AI clients.**
-- **Identifiers like `APP-42`**, never UUIDs.
-
-## 60-second setup
+Build from this checkout. `cargo install lific` and upstream release downloads install the original application, which does **not** contain these restrictions.
 
 ```bash
-cargo install lific   # or download a binary from Releases
-lific init            # config, database, admin account, background service on :3456
-lific connect         # MCP config for your AI clients
+cd web
+bun install --frozen-lockfile --ignore-scripts
+bun run build
+cd ..
+cargo build --release --locked
+./target/release/lific init --no-service --auth-mode login-free
+./target/release/lific start
 ```
 
-Restart your AI client. The web UI is at http://localhost:3456. `lific doctor` checks config, database, server and an MCP round trip, and exits nonzero if anything is broken.
+Open http://127.0.0.1:3456. Login-free mode opens the tracker directly as your local operator, without a login screen. `init --no-service` avoids installing a background service. Add `--here` to keep the config and database beside the checkout instead of the normal user data directory.
 
-- `lific init --here` keeps config and database in the current directory.
-- `lific init --no-service` skips the background service; run `lific start` yourself.
-- `lific service status | restart | stop | uninstall` manages the service.
+Dependency installation and compilation can download packages and toolchains. Prepare the binary on an approved build machine if the corporate laptop must remain offline. After preparing `web/node_modules` and the Cargo dependency cache, `bun run build` and `cargo build --release --locked --offline` can build without downloading dependencies.
 
-More: [Installation](https://lific.dev/docs/installation) · [Quickstart](https://lific.dev/docs/quickstart)
+## Local-only behavior
+
+- The HTTP server binds only to loopback. LAN/wildcard bind addresses, external public URLs, trusted proxies, and authless MCP path tokens are rejected.
+- HTTP CLI commands, login, diagnostics, MCP proxies, and multi-instance MCP can target only loopback addresses or `localhost`. HTTP clients ignore proxy settings and never follow redirects. `localhost` is pinned to loopback without DNS.
+- GitHub, Linear, and Jira live import transports are removed. The import UI is removed; old commands fail with an explanation.
+- Fonts and assets load locally. Browser policy blocks external requests, remote embeds, and external form submission. Markdown and diagram links cannot navigate to external destinations.
+- External browser origins, nonlocal Host headers, and forwarded requests are rejected. CORS is closed by default. OAuth callbacks must use loopback URLs.
+- No telemetry, automatic update check, or crash-upload service is configured. GitHub workflows require manual dispatch, and Cargo publication is disabled.
+
+Existing upstream configurations using remote settings must be edited before this fork will run. The local login-free settings are:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 3456
+cors_origins = []
+trusted_proxies = []
+
+[auth]
+required = false
+allow_signup = false
+```
+
+Keep the existing `[database]` and other sections when migrating a config. Omit `public_url`, `mcp_path_token`, and `mcp_path_user`.
+
+For an existing instance, also run `lific instance set --auto-login true --signups false` and restart it. Fresh `init --auth-mode login-free` instances already have browser auto-login enabled.
+
+## MCP and corporate data
+
+The direct stdio transport needs no HTTP listener:
+
+```bash
+lific connect --client <approved-client> --stdio
+```
+
+MCP gives the connected client access to tracker data. A cloud AI client can send that data to its own provider even though Lific itself is local-only. Use an approved local client/model when data must remain on the laptop. Lific cannot control browser extensions, other applications, filesystem sync, or OS-level forwarding. See [SECURITY.md](SECURITY.md) for the boundary and verification steps.
 
 ## What your agent can do
 
@@ -80,49 +91,6 @@ Each AI tool connects as its own bot under your account. The history says "OpenC
 
 The 5,781 tokens are the `tools/list` definitions as compact JSON, counted with tiktoken's o200k_base. Parameters and output: [MCP tools](https://lific.dev/docs/mcp/tools).
 
-## Connect your AI tools
-
-`lific connect` supports `opencode` · `claude-code` · `claude-desktop` · `cursor` · `vscode` · `codex` · `zed` · `gemini` · `windsurf` · `goose` · `crush`.
-
-```bash
-lific connect                                          # pick from the clients it finds
-lific connect --client opencode --client cursor --yes  # no prompts
-lific connect --client claude-code --scope project     # repo-local .mcp.json
-lific connect --client zed --stdio                     # no server: direct SQLite over stdio
-```
-
-It merges into existing config, and leaves a file it can't parse alone and prints the snippet instead. OAuth sign-in from the client and `lific login` for headless machines also work: [Connect agents](https://lific.dev/docs/connect).
-
-<details>
-<summary>Manual config for any MCP client</summary>
-
-Remote, over Streamable HTTP:
-
-```json
-{
-  "lific": {
-    "type": "remote",
-    "url": "http://localhost:3456/mcp",
-    "headers": { "Authorization": "Bearer your-api-key" }
-  }
-}
-```
-
-Local, over stdio with no server:
-
-```json
-{
-  "lific": {
-    "type": "local",
-    "command": ["lific", "--db", "path/to/lific.db", "mcp"]
-  }
-}
-```
-
-Create a key with `lific key create --name my-key --user <you>`. A stdio session without `LIFIC_TOKEN` acts as the instance operator.
-
-</details>
-
 ## CLI
 
 ```bash
@@ -130,70 +98,22 @@ lific issue list --project APP
 lific issue create --project APP --title "Fix login bug" --priority high
 lific issue update APP-42 --status done
 lific search "authentication" --project APP
-lific --backend http --url https://lific.example.com issue list --project APP   # after lific login
+lific --backend http --url http://127.0.0.1:3456 issue list --project APP
 ```
 
-The CLI reads the database directly, or a remote server with `--backend http`. Output is JSON when piped. `lific agents-md` adds a short Lific section to a repo's `AGENTS.md`. Full reference: [CLI](https://lific.dev/docs/cli).
+The CLI reads the database directly, or the local server with `--backend http`. Remote servers are refused. Output is JSON when piped. `lific agents-md` adds a short Lific section to a repo's `AGENTS.md`. Full reference: [CLI](https://lific.dev/docs/cli).
 
-## When Lific is the wrong tool
+## Backups
 
-- You coordinate a large team and need SSO, sprints or Gantt charts. Use Linear or Plane.
-- You want issues stored in the repo itself. Use a git-native tracker such as beads.
-- You need several servers syncing with each other. One Lific instance is one SQLite file.
-
-It's built for one person directing several agents.
-
-## Running it
-
-**Access.** New installs check project membership on every call, reads included. Add people with `lific member add --project APP --user sam --role maintainer`. See [Self-hosting](https://lific.dev/docs/self-hosting).
-
-**Backups.** Lific writes an archive every hour and keeps 24. For a one-off:
+Backups stay on disk. Keep the database, attachments, archives, and backups outside cloud-synced folders.
 
 ```bash
-lific dump                                    # database plus attachments, safe while running
-lific restore lific_20260703_141500.tar.gz    # stop the server first
+lific dump
+lific restore path/to/backup.tar.gz  # stop the server first
 ```
 
-**Config.** `lific init` writes `lific.toml`. Set `server.public_url` before exposing the server beyond localhost. See [Configuration](https://lific.dev/docs/configuration).
-
-**Docker.** Optional; the binary needs nothing else.
-
-```bash
-docker build -t lific .
-docker run -p 3456:3456 -v lific-data:/data \
-  -e LIFIC_INIT_ADMIN_NAME="Your Name" \
-  -e LIFIC_INIT_ADMIN_PASSWORD="a long password" \
-  lific
-```
-
-Both variables are required on first boot and ignored after it.
-
-**Upgrading.** Read [Upgrading](https://lific.dev/docs/upgrading) before you skip versions.
-
-## Build from source
-
-```bash
-git clone https://github.com/VoidNullable/lific && cd lific
-devenv allow && devenv shell
-devenv tasks run lific:debug-build
-```
-
-[CONTRIBUTING.md](CONTRIBUTING.md) covers tests and release builds.
-
-## Community
-
-Questions, bug reports and release announcements: [Discord](https://discord.gg/uWvaFC4f7D). Support questions get answered fastest in #support.
-
-## Contributing
-
-Issues and PRs welcome. For anything large, open an issue first.
-
-## MCP Registry
-
-Lific publishes `server.json` to the [MCP Registry](https://registry.modelcontextprotocol.io).
-
-- `mcp-name: io.github.VoidNullable/lific`
+The `site/`, `promo/`, and `deploy/` directories and historical documentation are upstream development material, not part of the embedded application. Their deployment instructions do not apply to this fork. Standard container port publishing is also unsupported because the process binds to loopback inside the container.
 
 ## License
 
-[Apache-2.0](LICENSE)
+Forked from Lific by VoidNullable. Original copyright and [Apache-2.0 license](LICENSE) are retained.

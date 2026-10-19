@@ -462,69 +462,26 @@ pub fn collect(
     Ok(out)
 }
 
-/// Live fetcher over Jira Cloud REST v3 with basic auth.
-pub struct LiveJira {
-    client: reqwest::blocking::Client,
-    site: String,
-    project_key: String,
-    auth: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct JiraSearchResponse {
-    #[serde(default)]
-    issues: Vec<JiraIssue>,
-    #[serde(default, rename = "nextPageToken")]
-    next_page_token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JiraCommentsResponse {
-    #[serde(default)]
-    comments: Vec<JiraComment>,
-}
-
+/// Compatibility stub: this fork has no external import transport.
+pub struct LiveJira;
 impl LiveJira {
     pub fn new(
-        site: &str,
-        project_key: &str,
-        email: &str,
-        token: &str,
-    ) -> Result<LiveJira, String> {
-        let site = validate_site_slug(site)?;
-        use base64::Engine;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent("lific-import/1.0")
-            .build()
-            .map_err(|e| format!("http client init failed: {e}"))?;
-        let raw = format!("{email}:{token}");
-        let auth = format!(
-            "Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
-        );
-        Ok(LiveJira {
-            client,
-            site,
-            project_key: project_key.to_string(),
-            auth,
-        })
+        _site: &str,
+        _project_key: &str,
+        _email: &str,
+        _token: &str,
+    ) -> Result<Self, String> {
+        Err(crate::network::IMPORT_DISABLED.into())
     }
-
-    fn base(&self) -> String {
-        format!("https://{}.atlassian.net/rest/api/3", self.site)
-    }
-
-    /// Return the canonical site slug used for both requests and identities.
     pub fn site_slug(&self) -> &str {
-        &self.site
+        ""
     }
 }
 
 /// Jira Cloud site names become the hostname component of the request URL.
 /// Keep this to one DNS-label-shaped slug so credentials can never be sent to
 /// an attacker-controlled host or path through string interpolation.
+#[cfg(test)]
 pub fn validate_site_slug(site: &str) -> Result<String, String> {
     let site = site.trim().to_ascii_lowercase();
     if site.is_empty()
@@ -543,62 +500,12 @@ pub fn validate_site_slug(site: &str) -> Result<String, String> {
 impl JiraFetcher for LiveJira {
     fn fetch_page(
         &self,
-        next_token: Option<&str>,
+        _next_token: Option<&str>,
     ) -> Result<(Vec<JiraIssue>, Option<String>), String> {
-        let jql = format!("project = {} ORDER BY created ASC", self.project_key);
-        let mut req = self
-            .client
-            .get(format!("{}/search/jql", self.base()))
-            .header("Authorization", &self.auth)
-            .header("Accept", "application/json")
-            .query(&[
-                ("jql", jql.as_str()),
-                ("maxResults", "50"),
-                (
-                    "fields",
-                    "summary,description,status,priority,labels,assignee,issuetype",
-                ),
-            ]);
-        if let Some(t) = next_token {
-            req = req.query(&[("nextPageToken", t)]);
-        }
-        let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
-        if resp.status().as_u16() == 401 {
-            return Err("Jira authentication failed — check email + API token".into());
-        }
-        if resp.status().as_u16() == 404 {
-            return Err(format!(
-                "Jira project {} not found on site {}",
-                self.project_key, self.site
-            ));
-        }
-        if !resp.status().is_success() {
-            return Err(format!("Jira returned HTTP {}", resp.status()));
-        }
-        let parsed: JiraSearchResponse = resp
-            .json()
-            .map_err(|e| format!("failed to parse Jira search response: {e}"))?;
-        Ok((parsed.issues, parsed.next_page_token))
+        Err(crate::network::IMPORT_DISABLED.into())
     }
-
-    fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>, String> {
-        let resp = self
-            .client
-            .get(format!("{}/issue/{key}/comment", self.base()))
-            .header("Authorization", &self.auth)
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|e| format!("request failed: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!(
-                "Jira returned HTTP {} fetching comments for {key}",
-                resp.status()
-            ));
-        }
-        let parsed: JiraCommentsResponse = resp
-            .json()
-            .map_err(|e| format!("failed to parse Jira comments: {e}"))?;
-        Ok(parsed.comments)
+    fn fetch_comments(&self, _key: &str) -> Result<Vec<JiraComment>, String> {
+        Err(crate::network::IMPORT_DISABLED.into())
     }
 }
 

@@ -127,7 +127,7 @@ pub struct AuthConfig {
     ///
     /// Guard rails in `lific start`: refuses to boot when this is false and
     /// `server.public_url` points anywhere but localhost, and logs a loud
-    /// warning otherwise (the default bind is 0.0.0.0 — LAN-reachable).
+    /// warning otherwise (this fork only permits loopback binds).
     pub required: bool,
     /// Emit the session cookie with the `Secure` attribute (HTTPS-only).
     ///
@@ -294,7 +294,7 @@ pub struct ServerConfig {
     pub port: u16,
     /// Public URL for OAuth discovery (e.g. https://your-server.example.com/lific)
     pub public_url: Option<String>,
-    /// Allowed CORS origins. If empty, allows all origins (not recommended for production).
+    /// Additional loopback CORS origins. Empty permits no cross-origin access.
     /// Example: ["https://your-app.example.com"]
     pub cors_origins: Vec<String>,
     /// IP addresses or CIDR ranges allowed to supply client-IP proxy headers.
@@ -373,7 +373,7 @@ pub struct RetentionConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 3456,
             public_url: None,
             cors_origins: Vec::new(),
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn defaults_are_sensible() {
         let config = Config::default();
-        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 3456);
         assert_eq!(config.server.trusted_proxies, Vec::<String>::new());
         assert_eq!(config.database.path, PathBuf::from("lific.db"));
@@ -1006,7 +1006,7 @@ enabled = false
     #[test]
     fn defaults_are_permissive_enough_to_warrant_failing_closed() {
         let d = Config::default();
-        assert_eq!(d.server.host, "0.0.0.0");
+        assert_eq!(d.server.host, "127.0.0.1");
         assert!(d.auth.allow_signup);
         assert!(d.server.cors_origins.is_empty()); // empty == allow any origin
     }
@@ -1020,7 +1020,7 @@ enabled = false
 
         let config = Config::load(Some(&path)).unwrap();
         assert_eq!(config.server.port, 7777);
-        assert_eq!(config.server.host, "0.0.0.0"); // default
+        assert_eq!(config.server.host, "127.0.0.1"); // default
         // Default db filename, anchored beside the config file it came from.
         assert_eq!(config.database.path, dir.join("lific.db"));
     }

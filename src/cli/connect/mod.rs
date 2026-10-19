@@ -584,6 +584,10 @@ pub fn run(
     pool: &DbPool,
     base: &PathBase,
 ) -> Result<ConnectResult, String> {
+    crate::network::validate_server(cfg)?;
+    if !args.stdio {
+        crate::network::local_url(&target_url(args, cfg))?;
+    }
     // Flag conflicts: --oauth mints nothing and writes header-less config, so a
     // stdio transport or an explicit key make no sense together with it.
     if args.oauth && args.stdio {

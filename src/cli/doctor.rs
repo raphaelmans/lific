@@ -258,11 +258,14 @@ fn unconfigured_checks(
 
 /// Run checks that depend on the configured server or its credentials.
 async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
+    if let Err(error) = crate::network::validate_server(cfg) {
+        return vec![Check::new("network_policy", Status::Fail, error)];
+    }
     let base = connect_base(cfg);
     let credential_base = cfg.server.public_url.as_deref().unwrap_or(&base);
     let mut checks = Vec::new();
 
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::network::client()
         .timeout(Duration::from_secs(3))
         .build()
     else {

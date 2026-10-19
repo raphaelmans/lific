@@ -137,29 +137,9 @@ impl HttpBackend {
         let link_context = IssueLinkContext::parse(base_url).ok_or_else(|| {
             anyhow!("HTTP backend URL must not contain credentials, a query, or a fragment")
         })?;
-        if parsed.scheme() == "http"
-            && api_key.is_some()
-            && parsed
-                .host_str()
-                .is_some_and(|host| !is_loopback_host(host))
-        {
-            bail!(
-                "refusing to send bearer credentials over plaintext http to {}",
-                parsed.host_str().unwrap_or_default()
-            );
-        }
-        if parsed.scheme() == "http"
-            && parsed
-                .host_str()
-                .is_some_and(|host| !is_loopback_host(host))
-        {
-            eprintln!(
-                "warning: connecting over unencrypted http to {}",
-                parsed.host_str().unwrap_or_default()
-            );
-        }
+        crate::network::local_url(base_url).map_err(anyhow::Error::msg)?;
         Ok(Self {
-            client: Client::builder()
+            client: crate::network::client()
                 .timeout(REQUEST_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
@@ -1794,32 +1774,32 @@ mod tests {
 
     #[test]
     fn trims_trailing_backend_url_slashes() {
-        let backend = HttpBackend::new("https://tracker.invalid///", None).unwrap();
-        assert_eq!(backend.base_url, "https://tracker.invalid");
+        let backend = HttpBackend::new("http://localhost///", None).unwrap();
+        assert_eq!(backend.base_url, "http://localhost");
     }
 
     #[test]
     fn trims_backend_url_whitespace_before_trailing_slashes() {
-        let backend = HttpBackend::new("  https://tracker.invalid///  ", None).unwrap();
-        assert_eq!(backend.base_url, "https://tracker.invalid");
+        let backend = HttpBackend::new("  http://localhost///  ", None).unwrap();
+        assert_eq!(backend.base_url, "http://localhost");
     }
 
     #[test]
     fn normalized_backend_url_constructs_links() {
-        let backend = HttpBackend::new("  https://tracker.invalid/lific/  ", None).unwrap();
+        let backend = HttpBackend::new("  http://localhost/lific/  ", None).unwrap();
 
         assert_eq!(
             backend.link_context.issue_markdown("LIF-42").to_string(),
-            "[LIF-42](https://tracker.invalid/lific/LIF/issues/LIF-42)"
+            "[LIF-42](http://localhost/lific/LIF/issues/LIF-42)"
         );
     }
 
     #[test]
     fn rejects_ambiguous_backend_urls() {
         for base_url in [
-            "https://user:password@tracker.invalid",
-            "https://tracker.invalid?tenant=one",
-            "https://tracker.invalid#fragment",
+            "http://user:password@localhost",
+            "http://localhost?tenant=one",
+            "http://localhost#fragment",
         ] {
             assert!(HttpBackend::new(base_url, None).is_err(), "{base_url}");
         }
@@ -1842,15 +1822,15 @@ mod tests {
             Err(error) => error,
         };
         let message = error.to_string();
-        assert!(message.contains("plaintext http"));
+        assert!(message.contains("Local-only policy"));
         assert!(!message.contains("secret-key"));
         assert!(HttpBackend::new("http://127.0.0.1:3456", Some("secret-key")).is_ok());
-        assert!(HttpBackend::new("http://tracker.example", None).is_ok());
+        assert!(HttpBackend::new("http://tracker.example", None).is_err());
     }
 
     #[test]
     fn builds_authenticated_json_request() {
-        let backend = HttpBackend::new("https://tracker.invalid", Some("key-value")).unwrap();
+        let backend = HttpBackend::new("http://localhost", Some("key-value")).unwrap();
         let body = json!({"title": "A test"});
         let request = backend
             .request_builder(Method::POST, "/api/issues")
@@ -1858,7 +1838,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(request.url().as_str(), "https://tracker.invalid/api/issues");
+        assert_eq!(request.url().as_str(), "http://localhost/api/issues");
         assert_eq!(
             request.headers().get("authorization").unwrap(),
             "Bearer key-value"
@@ -1876,7 +1856,7 @@ mod tests {
 
     #[test]
     fn builds_request_without_auth_when_key_is_absent() {
-        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+        let backend = HttpBackend::new("http://localhost", None).unwrap();
         let request = backend
             .request_builder(Method::GET, "/api/projects")
             .build()
@@ -1889,7 +1869,7 @@ mod tests {
 
     #[test]
     fn encodes_query_parameters_in_request_builder() {
-        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+        let backend = HttpBackend::new("http://localhost", None).unwrap();
         let params = [("search term", "a/b".to_owned())];
         let request = backend
             .request_builder(Method::GET, "/api/search")
@@ -1905,7 +1885,7 @@ mod tests {
 
     #[test]
     fn preserves_request_methods_and_paths() {
-        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+        let backend = HttpBackend::new("http://localhost", None).unwrap();
         let request = backend
             .request_builder(Method::DELETE, "/api/labels/4")
             .build()
@@ -3512,7 +3492,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_commands_outside_http_data_scope() {
-        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+        let backend = HttpBackend::new("http://localhost", None).unwrap();
         let error = backend
             .execute(
                 &Command::Start {
@@ -3841,7 +3821,7 @@ mod tests {
     /// last step.
     #[tokio::test]
     async fn falls_back_to_json_for_unrecognized_responses() {
-        let backend = HttpBackend::new("https://tracker.invalid", None).unwrap();
+        let backend = HttpBackend::new("http://localhost", None).unwrap();
 
         let rendered = backend
             .human(

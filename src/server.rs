@@ -26,7 +26,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rust_embed::Embed;
 use tower_http::compression::Compression;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info, warn};
 
 use crate::config::{self, Config};
@@ -115,25 +115,58 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
 /// pages and CORS preflights. Route-specific policies such as the attachment
 /// sandbox win when they are already present.
 async fn add_security_headers(request: Request<Body>, next: middleware::Next) -> Response {
+    let policy = browser_content_security_policy(request.uri());
+    // With no-referrer, Chromium sends Origin: null for native form posts.
+    // Keep an authenticatable Origin on local OAuth forms; same-origin still
+    // withholds the referrer from every external destination.
+    let referrer_policy = if matches!(
+        request.uri().path(),
+        "/oauth/authorize" | "/authorize" | "/oauth/device" | "/device"
+    ) {
+        "same-origin"
+    } else {
+        "no-referrer"
+    };
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     for (name, value) in [
         (header::X_FRAME_OPTIONS, "DENY"),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        (header::REFERRER_POLICY, "no-referrer"),
-        (
-            header::CONTENT_SECURITY_POLICY,
-            "frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
-        ),
+        (header::REFERRER_POLICY, referrer_policy),
     ] {
         headers
             .entry(name)
             .or_insert(HeaderValue::from_static(value));
     }
     headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(policy);
+    headers
         .entry(HeaderName::from_static("cross-origin-resource-policy"))
         .or_insert(HeaderValue::from_static("same-origin"));
+    headers.insert(
+        HeaderName::from_static("x-dns-prefetch-control"),
+        HeaderValue::from_static("off"),
+    );
     response
+}
+
+fn browser_content_security_policy(uri: &axum::http::Uri) -> HeaderValue {
+    let mut policy = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'".to_owned();
+    // Chromium also checks the destination of a form's redirect. Permit the
+    // one validated loopback callback on a consent page, so local OAuth still
+    // works without allowing arbitrary form destinations throughout the app.
+    if matches!(uri.path(), "/oauth/authorize" | "/authorize")
+        && let Ok(params) = serde_urlencoded::from_str::<std::collections::HashMap<String, String>>(
+            uri.query().unwrap_or_default(),
+        )
+        && let Some(callback) = params.get("redirect_uri")
+        && let Ok(url) = crate::network::local_url(callback)
+    {
+        policy.push(' ');
+        policy.push_str(&url.origin().ascii_serialization());
+    }
+    HeaderValue::from_str(&policy).expect("policy contains only static text and a validated origin")
 }
 
 /// How far this instance can be reached from, as configured.
@@ -509,6 +542,7 @@ pub(crate) fn build_app_with_store(
             // Compression's DefaultPredicate already skips SSE
             // (text/event-stream — so MCP streaming is untouched), gRPC,
             // already-compressed images, and bodies under 32 bytes.
+            .layer(middleware::from_fn(crate::network::local_requests_only))
             .layer(middleware::from_fn(add_security_headers)),
     )
 }
@@ -522,6 +556,7 @@ fn with_compression(app: Router) -> Router {
 /// `lific start`: bring up the HTTP server for `cfg` and serve until a
 /// shutdown signal arrives.
 pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    crate::network::validate_server(cfg)?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -540,7 +575,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     // LIF-294: guard rails for auth-optional mode. Refuse outright
     // when the instance says it's publicly reachable; shout otherwise
-    // (the default bind is 0.0.0.0 — the whole LAN can reach it).
+    // (this fork additionally enforces loopback before reaching this point).
     //
     // LIF-406: "publicly reachable" is [`Reachability`]'s question, not a
     // bind-host string comparison, so a loopback bind behind a public reverse
@@ -659,8 +694,12 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         attachment_store,
     );
 
-    let addr = format!("{}:{}", cfg.server.host, cfg.server.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    // Bind an IP directly, never a name that could resolve off-machine.
+    let addr = SocketAddr::new(
+        crate::network::loopback_ip(&cfg.server.host)?,
+        cfg.server.port,
+    );
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr = %addr, "lific server started (REST + MCP + OAuth at /mcp)");
     // Under the Windows service supervisor, report that the port is ours.
     crate::cli::service::windows::notify_ready();
@@ -730,7 +769,7 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
         .max_age(std::time::Duration::from_secs(86400));
 
     if cors_origins.is_empty() {
-        layer.allow_origin(Any)
+        layer
     } else {
         let origins: Vec<HeaderValue> =
             cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
@@ -739,7 +778,10 @@ fn build_global_cors(cors_origins: &[String]) -> CorsLayer {
             "Wildcard origin (`*`) cannot be passed to configured cors_origins"
         );
         layer.allow_origin(AllowOrigin::predicate(move |origin, _| {
-            origins.contains(origin)
+            origin
+                .to_str()
+                .is_ok_and(|value| crate::network::local_url(value).is_ok())
+                && origins.contains(origin)
         }))
     }
 }
@@ -1050,8 +1092,8 @@ mod cors_tests {
             headers
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("*"),
-            "empty cors_origins should allow any origin"
+            None,
+            "empty cors_origins must deny cross-origin access"
         );
 
         let allow_methods = headers
@@ -1104,14 +1146,14 @@ mod cors_tests {
     #[tokio::test]
     async fn explicit_origins_are_allowlisted() {
         let app = app_with_cors(&[
-            "https://claude.ai".to_string(),
+            "http://127.0.0.1:5173".to_string(),
             "invalid\norigin".to_string(),
         ]);
 
         let req = Request::builder()
             .method(Method::OPTIONS)
             .uri("/mcp")
-            .header("origin", "https://claude.ai")
+            .header("origin", "http://127.0.0.1:5173")
             .header("access-control-request-method", "POST")
             .body(Body::empty())
             .unwrap();
@@ -1122,7 +1164,7 @@ mod cors_tests {
             res.headers()
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("https://claude.ai")
+            Some("http://127.0.0.1:5173")
         );
 
         let req = Request::builder()
@@ -1245,7 +1287,7 @@ mod cors_tests {
         let store_guard = tempfile::tempdir().expect("attachment tempdir");
         let mut cfg = Config::default();
         cfg.auth.required = true;
-        cfg.server.cors_origins = vec!["https://client.example".into()];
+        cfg.server.cors_origins = vec!["http://127.0.0.1:5173".into()];
         cfg.server.mcp_path_token = Some("secret".into());
         let trusted_proxies = Arc::<[ratelimit::IpNetwork]>::from(
             cfg.server.trusted_proxy_ranges().expect("proxy ranges"),
@@ -1270,7 +1312,7 @@ mod cors_tests {
                     Request::builder()
                         .method(Method::OPTIONS)
                         .uri(uri)
-                        .header("origin", "https://client.example")
+                        .header("origin", "http://127.0.0.1:5173")
                         .header("access-control-request-method", requested_method)
                         .header("access-control-request-headers", "authorization")
                         .body(Body::empty())
@@ -1289,7 +1331,7 @@ mod cors_tests {
                     .headers()
                     .get("access-control-allow-origin")
                     .and_then(|value| value.to_str().ok()),
-                Some("https://client.example"),
+                Some("http://127.0.0.1:5173"),
                 "preflight for {uri} lost the configured origin"
             );
         }
@@ -1401,6 +1443,33 @@ mod frontend_security_headers_tests {
     use super::*;
     use tower::ServiceExt;
 
+    #[test]
+    fn oauth_forms_allow_only_the_specific_loopback_callback() {
+        let local = browser_content_security_policy(
+            &"/oauth/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A7890%2Fcallback"
+                .parse()
+                .unwrap(),
+        );
+        assert!(
+            local
+                .to_str()
+                .unwrap()
+                .ends_with("form-action 'self' http://127.0.0.1:7890")
+        );
+        for uri in [
+            "/oauth/authorize?redirect_uri=https%3A%2F%2Fevil.example%2Fcallback",
+            "/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost.evil.example%2Fcallback",
+            "/?redirect_uri=http%3A%2F%2F127.0.0.1%3A7890%2Fcallback",
+        ] {
+            assert!(
+                browser_content_security_policy(&uri.parse().unwrap())
+                    .to_str()
+                    .unwrap()
+                    .ends_with("form-action 'self'")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn frontend_responses_cannot_be_framed_or_mime_sniffed() {
         let app = Router::new()
@@ -1433,7 +1502,9 @@ mod frontend_security_headers_tests {
             headers
                 .get(header::CONTENT_SECURITY_POLICY)
                 .and_then(|v| v.to_str().ok()),
-            Some("frame-ancestors 'none'; base-uri 'self'; object-src 'none'")
+            Some(
+                "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
+            )
         );
         assert_eq!(
             headers

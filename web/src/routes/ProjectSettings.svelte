@@ -34,7 +34,6 @@
   import IconPicker from "../lib/IconPicker.svelte";
   import LabelManager from "../lib/LabelManager.svelte";
   import ProjectMembers from "../lib/ProjectMembers.svelte";
-  import ImportPanel from "../lib/ImportPanel.svelte";
   import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
@@ -776,8 +775,7 @@
         {#if canManage}
           <ProjectMembers projectId={project.id} />
 
-          <!-- ── IMPORT (LIF-264) ─────────────────────────── -->
-          <ImportPanel projectId={project.id} onImported={() => loadAll(projectIdentifier)} />
+
         {/if}
 
         <!-- ── RECENT ACTIVITY ──────────────────────────── -->

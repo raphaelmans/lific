@@ -28,18 +28,14 @@
   import { toast } from "./toast/toast.svelte";
   import { tick } from "svelte";
 
-  // LIF-471: in public scope an <img> may only point at this instance's own
-  // attachments. Registered once (hooks are global to DOMPurify) and inert
-  // outside public scope. An image with no `src` renders as its alt text.
-  const PUBLIC_IMG_SRC_RE = /^\/api\/attachments\/\d+\/?$/;
-  DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
-    if (!inPublicScope()) return;
-    if (data.attrName !== "src") return;
-    // `<input type="image" src>` fetches too; task-list checkboxes need the
-    // element, so only the attribute goes.
-    if (node.nodeName === "INPUT") data.keepAttr = false;
-    if (node.nodeName === "IMG" && !PUBLIC_IMG_SRC_RE.test(data.attrValue)) {
-      data.keepAttr = false;
+  // Strip external destinations before markup is inserted into the document.
+  // This applies to signed-in content and generated diagrams as well.
+  DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+    if (["href", "xlink:href", "src", "action", "formaction"].includes(data.attrName)) {
+      try {
+        const url = new URL(data.attrValue, window.location.href);
+        if (url.origin !== window.location.origin || url.username || url.password) data.keepAttr = false;
+      } catch { data.keepAttr = false; }
     }
   });
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
@@ -281,8 +277,8 @@
   // time). Everything that can fetch on its own is dropped in public scope:
   // media elements, embeds, stylesheets, inline styles, `srcset`/`poster`,
   // and any `<img>` whose source is not one of this instance's attachments.
-  // Links the reader chooses to click survive. The signed-in renderer keeps
-  // its permissive config: there the author is a colleague or their agent.
+  // This fork applies the same restrictions to every document and strips
+  // external navigation links as well.
   const PUBLIC_FORBID_TAGS = [
     "video", "audio", "source", "track", "picture", "iframe", "object",
     "embed", "style", "link", "form", "svg", "image", "use", "math",
@@ -308,9 +304,8 @@
         "data-attachment",
         "download",
       ],
-      ...(inPublicScope()
-        ? { FORBID_TAGS: PUBLIC_FORBID_TAGS, FORBID_ATTR: PUBLIC_FORBID_ATTR }
-        : {}),
+      FORBID_TAGS: PUBLIC_FORBID_TAGS,
+      FORBID_ATTR: PUBLIC_FORBID_ATTR,
     })
   );
 
@@ -526,6 +521,7 @@
           ? "dark"
           : "default",
         securityLevel: "strict",
+        flowchart: { htmlLabels: false },
       });
       for (const block of Array.from(blocks)) {
         if (cancelled) return;
@@ -537,7 +533,6 @@
             // a fetch the author chose. The body sanitizer never sees this
             // SVG (it is produced after sanitization), so it gets the same
             // public-scope rule here: no external fetches from a body.
-            if (!inPublicScope()) return out;
             return {
               svg: DOMPurify.sanitize(out.svg, {
                 USE_PROFILES: { svg: true, svgFilters: true },

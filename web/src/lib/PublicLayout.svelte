@@ -125,9 +125,7 @@
   >
     <div class="px-3 pt-3 pb-2 flex items-center gap-1.5">
       <a
-        href="https://lific.dev"
-        target="_blank"
-        rel="noopener noreferrer"
+        href="/"
         title="Lific"
         class="group flex flex-1 min-w-0 items-center gap-2.5 px-1 py-1 rounded-lg hover:bg-[var(--bg-subtle)] transition-colors"
       >

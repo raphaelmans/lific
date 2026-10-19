@@ -155,7 +155,8 @@ pub struct HttpDeviceFlow {
 
 impl HttpDeviceFlow {
     pub fn new(base: &str) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
+        crate::network::local_url(base)?;
+        let client = crate::network::blocking_client()
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;

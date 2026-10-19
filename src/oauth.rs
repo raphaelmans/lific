@@ -285,6 +285,7 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
     if trimmed.contains('#') {
         return Err("redirect_uri must not contain a fragment");
     }
+    crate::network::local_url(trimmed).map_err(|_| "redirect_uri must be a loopback HTTP URL")?;
     Ok(())
 }
 
@@ -302,6 +303,18 @@ pub fn router(state: OAuthState) -> Router {
         .route(
             "/.well-known/oauth-protected-resource/mcp",
             get(protected_resource_metadata),
+        )
+        .route(
+            "/oauth/tool-picker.js",
+            get(|| async {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/javascript; charset=utf-8",
+                    )],
+                    include_str!("oauth-tool-picker.js"),
+                )
+            }),
         )
         .route("/oauth/register", post(register_client))
         .route(
@@ -1287,8 +1300,8 @@ const CUSTOM_TOOL_OPTION: &str = "__custom__";
 /// `Custom tool…` option is chosen. Known tools come first; the pick-list and
 /// the free-text input are never both live at once.
 ///
-/// The reveal script compares against [`CUSTOM_TOOL_OPTION`] interpolated from
-/// the Rust constant, so the option value lives in exactly one place.
+/// The same-origin reveal script uses the same sentinel as [`CUSTOM_TOOL_OPTION`].
+/// Keep the script sentinel in sync with this Rust constant.
 /// Render the shared Connected Tools pick-list widget, pre-selecting the given
 /// remembered tool when present (LIFIC-15).
 ///
@@ -1341,14 +1354,7 @@ fn tool_pick_list_html(preset_id: Option<&str>) -> String {
             <label for=\"tool_custom\">Custom tool name</label>
             <input type=\"text\" name=\"tool_custom\" id=\"tool_custom\" placeholder=\"e.g. my-agent\" value=\"{custom_value}\">
         </div>
-        <script>
-        var tool = document.getElementById('tool');
-        var custom = document.getElementById('custom_tool');
-        tool.addEventListener('change', function () {{
-            custom.style.display = tool.value === '{custom_option_value}' ? 'block' : 'none';
-        }});
-        </script>",
-        custom_option_value = CUSTOM_TOOL_OPTION,
+        <script src=\"/oauth/tool-picker.js\" defer></script>",
     )
 }
 
@@ -4123,9 +4129,9 @@ mod tests {
     fn validate_redirect_uri_accepts_http_and_https() {
         assert!(validate_redirect_uri("http://localhost/callback").is_ok());
         assert!(validate_redirect_uri("http://127.0.0.1:8080/cb").is_ok());
-        assert!(validate_redirect_uri("https://app.example.com/oauth/callback").is_ok());
+        assert!(validate_redirect_uri("https://app.example.com/oauth/callback").is_err());
         assert!(validate_redirect_uri("HTTP://localhost/callback").is_ok());
-        assert!(validate_redirect_uri("HTTPS://example.com/").is_ok());
+        assert!(validate_redirect_uri("HTTPS://example.com/").is_err());
     }
 
     #[test]
@@ -4167,7 +4173,7 @@ mod tests {
     #[test]
     fn validate_redirect_uri_rejects_fragments() {
         assert!(validate_redirect_uri("https://example.com/callback#fragment").is_err());
-        assert!(validate_redirect_uri("https://example.com/callback?mode=full").is_ok());
+        assert!(validate_redirect_uri("http://localhost/callback?mode=full").is_ok());
     }
 
     #[tokio::test]

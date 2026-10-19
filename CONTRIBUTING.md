@@ -1,5 +1,7 @@
 # Contributing to Lific
 
+> **Local-only fork:** Follow [MUST_README.md](MUST_README.md) and [SECURITY.md](SECURITY.md) first. The upstream instructions below are historical guidance; remote hosting, automatic release publishing, and upstream setup defaults do not apply to this fork.
+
 Lific accepts contributions. The project is primarily a one-person effort built heavily with AI agents, under human direction and review. AI-assisted PRs aren't just welcome, they're the dominant authorship model here. Don't hide it, and don't apologize for it. The same bar applies either way: you should be able to explain your change to a reviewer, and it has to pass the test suite.
 
 If you want to discuss an idea before writing code, open an issue. If you have a small, focused fix ready, just send the PR. Either path is fine.

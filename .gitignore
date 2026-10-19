@@ -13,6 +13,7 @@
 /archived-projects/
 .env
 AGENTS.md
+!/AGENTS.md
 .openchamber
 deploy.sh
 dev-backend.sh
