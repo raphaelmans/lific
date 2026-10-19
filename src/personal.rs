@@ -54,6 +54,13 @@ pub fn prepare(pool: &DbPool) -> Result<String, LificError> {
 
 fn unavailable(path: &str, method: &Method) -> bool {
     let path = path.trim_end_matches('/');
+    if path.starts_with("/api/auth/") {
+        return match path {
+            "/api/auth/bots" => !matches!(*method, Method::GET | Method::POST),
+            "/api/auth/auto-login" | "/api/auth/me" | "/api/auth/me/refresh" => false,
+            _ => !path.starts_with("/api/auth/bots/"),
+        };
+    }
     path.starts_with("/oauth")
         || path.starts_with("/.well-known")
         || path.starts_with("/mcp/")
@@ -64,13 +71,6 @@ fn unavailable(path: &str, method: &Method) -> bool {
         || path == "/public"
         || path.starts_with("/public/")
         || path.starts_with("/api/public/")
-        || (path.starts_with("/api/auth/")
-            && !(path == "/api/auth/bots" && matches!(*method, Method::GET | Method::POST))
-            && !path.starts_with("/api/auth/bots/")
-            && !matches!(
-                path,
-                "/api/auth/auto-login" | "/api/auth/me" | "/api/auth/me/refresh"
-            ))
         || (path == "/api/users" && method != Method::GET)
         || path.starts_with("/api/users/")
         || (path.starts_with("/api/projects/")
