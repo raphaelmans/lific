@@ -13,6 +13,7 @@ mod git_hook;
 mod home;
 mod insights;
 mod issues;
+mod local_workspace;
 mod members;
 mod pages;
 mod plans;
@@ -77,6 +78,14 @@ fn router_impl(
     attachment_store: Option<crate::storage::AttachmentStore>,
 ) -> Router {
     Router::new()
+        .route(
+            "/api/workspace",
+            get(local_workspace::get).patch(local_workspace::rename),
+        )
+        .route(
+            "/api/import-file",
+            post(local_workspace::import_file).layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
         // Public instance metadata for the auth screen (unauthenticated).
         .route("/api/instance", get(auth::instance_info))
         // Admin-only instance settings (authenticated; admin enforced in handler).

@@ -58,8 +58,8 @@ This project tracks its work in Lific.\n\
 {ident_note}\
 \n\
 Use the Lific MCP tools for issues, pages, and plans when they are connected. \
-Use the `lific` CLI for work that needs this machine. The MCP server can run on \
-another host, so it cannot see your files, working directory, or git history. \
+Use the `lific` CLI for work that needs this machine. This fork uses local stdio or loopback HTTP MCP; it has no remote server connection. \
+Use CLI commands for the working directory and git history. \
 The CLI also has every data command, for when MCP is not connected. Add `--json` \
 for machine-readable output:\n\
 \n\
@@ -189,12 +189,12 @@ mod tests {
 
         // The distinction that justifies keeping both has to survive edits.
         assert!(
-            block.contains("another host"),
-            "the block must explain that the MCP server may not be on this machine"
+            block.contains("local stdio or loopback HTTP MCP") && !block.contains("another host"),
+            "the block must describe the personal local-only transport"
         );
         assert!(
             block.contains("git history") && block.contains("working directory"),
-            "the block must name what MCP cannot see, which is why the CLI exists"
+            "the block must name the local CLI workflow"
         );
     }
 

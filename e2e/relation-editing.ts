@@ -82,6 +82,7 @@ export async function checkRelationEditing(context: BrowserContext, base: string
   page.on("pageerror", (err) => pageErrors.push(String(err)));
   try {
     await page.goto(`${base}/DEMO/issues/DEMO-1`);
+    await page.waitForFunction(() => !!localStorage.getItem("lific_token"));
     const [blocked, blocker, mirroredA, mirroredB, origin, elsewhere, picked, many, first, second] =
       await createIssues(page, [
         "Blocked work",

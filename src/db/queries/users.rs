@@ -471,7 +471,7 @@ pub fn first_admin(conn: &Connection) -> Result<Option<AuthUser>, LificError> {
     match conn.query_row(
         // LIF-214: a deactivated admin is not an identity anything may fall
         // back to, so the passwordless/stdio resolver skips them.
-        "SELECT id, username, display_name, is_admin FROM users WHERE is_admin = 1 AND is_active = 1 ORDER BY created_at LIMIT 1",
+        "SELECT id, username, display_name, is_admin FROM users WHERE is_admin = 1 AND is_active = 1 AND is_bot = 0 ORDER BY created_at, id LIMIT 1",
         [],
         |row| {
             Ok(AuthUser {

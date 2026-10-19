@@ -1173,7 +1173,7 @@
       <div class="sidebar-footer p-2 flex items-center gap-1">
         <a href="#/settings" use:navLink={navigate} aria-current={isActive('/settings') ? 'page' : undefined}
           class="sidebar-destination sidebar-account flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors"
-          title="Account settings"
+          title="Personal settings"
         >
           <div
             class="sidebar-avatar size-7 rounded-full

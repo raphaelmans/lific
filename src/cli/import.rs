@@ -25,6 +25,24 @@ pub fn run(
     crate::actor::set_default_transport(crate::actor::Transport::Cli);
 
     let summary = match action {
+        ImportAction::File {
+            file,
+            source,
+            project,
+            namespace,
+            dry_run,
+        } => {
+            crate::personal::prepare(&pool)?;
+            let bytes = crate::import::file::read(file)?;
+            crate::import::file::run(
+                &pool,
+                project,
+                *source,
+                namespace.as_deref(),
+                &bytes,
+                *dry_run,
+            )?
+        }
         ImportAction::Github {
             repo,
             project,

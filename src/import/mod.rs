@@ -34,6 +34,7 @@
 //! - [`github`] / [`linear`] / [`jira`] — per-source fetch + map to
 //!   [`NormalizedIssue`].
 
+pub mod file;
 pub mod github;
 pub mod jira;
 pub mod linear;

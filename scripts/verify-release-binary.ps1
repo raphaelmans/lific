@@ -42,15 +42,15 @@ path = "lific.db"
 [backup]
 enabled = false
 [auth]
-required = true
+required = false
 allow_signup = false
 "@ | Set-Content $config
     $stdout = Join-Path $scratch "server.out"
     $stderr = Join-Path $scratch "server.err"
-    $env:LIFIC_INIT_ADMIN_NAME = "CI"
-    $env:LIFIC_INIT_ADMIN_PASSWORD = "ci-release-password-123"
+    & $binaryPath --config $config init --no-service --name CI
+    if ($LASTEXITCODE -ne 0) { throw "Personal workspace initialization failed" }
     $server = Start-Process -FilePath $binaryPath -WorkingDirectory $scratch `
-        -ArgumentList @("--config", ('"{0}"' -f $config), "start", "--init-if-missing") `
+        -ArgumentList @("--config", ('"{0}"' -f $config), "start") `
         -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $ready = $false
@@ -58,7 +58,7 @@ allow_signup = false
         if ($server.HasExited) { throw "lific exited with code $($server.ExitCode)`n$(Get-Content $stderr -Raw)" }
         # A bind log from this process prevents an unrelated listener from
         # satisfying readiness if it claimed the port after our allocation.
-        if ((Get-Content $stdout -Raw) -match "lific server started") {
+        if ((Get-Content $stdout -Raw) -match "personal web app started") {
             try {
                 $health = Invoke-WebRequest "http://127.0.0.1:$port/api/health" -TimeoutSec 2
                 if ($health.StatusCode -eq 200) { $ready = $true; break }

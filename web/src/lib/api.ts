@@ -497,6 +497,22 @@ export interface Bot {
   tool_id: string | null;
 }
 
+export interface LocalWorkspace { name: string; executable: string; database: string }
+export const getWorkspace = () => request<LocalWorkspace>("/workspace");
+export const renameWorkspace = (name: string) => request<LocalWorkspace>("/workspace", { method: "PATCH", body: JSON.stringify({ name }) });
+export interface FileImportSummary {
+  dry_run: boolean;
+  issues_created: number;
+  issues_skipped_existing: number;
+  comments_created: number;
+  comments_planned: number;
+  labels_created: number;
+  labels_planned: number;
+  skipped_non_issues: number;
+}
+export const importIssueFile = (input: { source: string; project: string; namespace?: string; data: unknown; dry_run: boolean }) =>
+  request<FileImportSummary>("/import-file", { method: "POST", body: JSON.stringify(input) });
+
 export interface CreateBotResponse {
   bot: { id: number; username: string; display_name: string };
   key: string;

@@ -28,15 +28,41 @@
   import { toast } from "./toast/toast.svelte";
   import { tick } from "svelte";
 
-  // Strip external destinations before markup is inserted into the document.
-  // This applies to signed-in content and generated diagrams as well.
-  DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  // Source links may navigate when clicked. Every embedded resource still
+  // has to be local, including images hosted on the approved font domains.
+  DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
     if (["href", "xlink:href", "src", "action", "formaction"].includes(data.attrName)) {
       try {
         const url = new URL(data.attrValue, window.location.href);
-        if (url.origin !== window.location.origin || url.username || url.password) data.keepAttr = false;
+        if (["VIDEO", "AUDIO", "SOURCE", "TRACK"].includes(node.nodeName) && data.attrName === "src") {
+          if (url.origin !== window.location.origin || !/^\/api\/attachments\/\d+$/.test(url.pathname) || url.search || url.hash) data.keepAttr = false;
+        }
+        const sourceLink = node.nodeName === "A"
+          && node.namespaceURI === "http://www.w3.org/1999/xhtml"
+          && data.attrName === "href"
+          && ["http:", "https:"].includes(url.protocol);
+        if (url.username || url.password || (url.origin !== window.location.origin && !sourceLink)) {
+          data.keepAttr = false;
+        }
       } catch { data.keepAttr = false; }
     }
+  });
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (["VIDEO", "AUDIO"].includes(node.nodeName)) {
+      node.setAttribute("controls", "");
+      node.setAttribute("preload", "none");
+      node.removeAttribute("autoplay");
+    }
+    if (node.nodeName !== "A" || !node.hasAttribute("href")) return;
+    try {
+      const url = new URL(node.getAttribute("href")!, window.location.href);
+      if (url.origin !== window.location.origin) {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+        node.setAttribute("referrerpolicy", "no-referrer");
+        node.removeAttribute("download");
+      }
+    } catch { node.removeAttribute("href"); }
   });
   import AttachmentView from "./attachments/viewers/AttachmentView.svelte"; // LIF-418
 
@@ -277,13 +303,13 @@
   // time). Everything that can fetch on its own is dropped in public scope:
   // media elements, embeds, stylesheets, inline styles, `srcset`/`poster`,
   // and any `<img>` whose source is not one of this instance's attachments.
-  // This fork applies the same restrictions to every document and strips
-  // external navigation links as well.
+  // This fork applies the same resource restrictions to every document.
+  // HTTP(S) source links survive for explicit clicks, without previews.
   const PUBLIC_FORBID_TAGS = [
-    "video", "audio", "source", "track", "picture", "iframe", "object",
+    "picture", "iframe", "object",
     "embed", "style", "link", "form", "svg", "image", "use", "math",
   ];
-  const PUBLIC_FORBID_ATTR = ["style", "srcset", "poster", "background", "ping"];
+  const PUBLIC_FORBID_ATTR = ["style", "srcset", "poster", "background", "ping", "attributionsrc"];
   let html = $derived(
     DOMPurify.sanitize(
       decorateAttachmentLinks(

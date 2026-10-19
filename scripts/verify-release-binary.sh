@@ -89,18 +89,21 @@ enabled = false
 dir = "$scratch/backups"
 
 [auth]
-required = true
+required = false
 allow_signup = false
 
 [log]
 level = "info"
 TOML
 
-LIFIC_INIT_ADMIN_NAME=Release \
-  LIFIC_INIT_ADMIN_PASSWORD=release-smoke-password-123 \
-  "$binary" \
+"$binary" --config "$config" init --no-service --name Release >"$scratch/init.log" 2>&1 || {
+  cat "$scratch/init.log" >&2
+  exit 1
+}
+
+"$binary" \
   --config "$config" \
-  start --init-if-missing --host 127.0.0.1 --port "$port" \
+  start --port "$port" \
   >"$scratch/server.log" 2>&1 &
 server_pid=$!
 
@@ -138,7 +141,7 @@ while ((SECONDS < startup_deadline)); do
   # The production server logs this only after TcpListener::bind succeeds.
   # Waiting for that event ties the HTTP probe to this process rather than
   # accepting the first response from an unrelated listener.
-  if grep -q 'lific server started' "$scratch/server.log"; then
+  if grep -q 'personal web app started' "$scratch/server.log"; then
     started=true
     if budget="$(request_budget)"; then
       if curl --fail --silent --show-error \

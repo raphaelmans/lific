@@ -35,6 +35,7 @@ const PLACEHOLDER = /^Jump or act/;
 type Seeded = { projectId: number };
 
 async function seed(page: Page, base: string): Promise<Seeded> {
+  await page.waitForFunction(() => !!localStorage.getItem("lific_token"));
   return page.evaluate(
     async ({ warmupCount, token, mixed }) => {
       const auth = localStorage.getItem("lific_token");

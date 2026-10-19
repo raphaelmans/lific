@@ -1,13 +1,4 @@
-//! Process-level contract for `lific start --init-if-missing` (LIF-468).
-//!
-//! The unit tests cover the guards; this covers the thing an operator
-//! actually gets: an image whose first boot leaves a working, authenticated
-//! instance behind, and a plain `start` that still refuses on the same empty
-//! volume.
-//!
-//! Every wait here is bounded, and the server child is owned by a guard that
-//! kills it on drop, so a failing assertion never leaks a listening process.
-
+//! Process tests for the personal, login-free workspace. Every server uses temporary data.
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -16,11 +7,6 @@ use std::time::{Duration, Instant};
 
 /// Longest we ever wait for the server to answer.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
-
-const ADMIN_NAME: &str = "Container Admin";
-const ADMIN_PASSWORD: &str = "first-boot-test-password";
-/// `derive_username` slugifies the display name.
-const ADMIN_USERNAME: &str = "container-admin";
 
 /// Kills the server on drop, including while a test is unwinding.
 struct ServerChild(Child);
@@ -83,6 +69,7 @@ fn lific(config: &Path) -> Command {
 
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("build client")
@@ -136,9 +123,7 @@ fn boot_server(
         let config = write_config(dir, db_path, port);
         let mut server = ServerChild(
             lific(&config)
-                .args(["start", "--init-if-missing"])
-                .env("LIFIC_INIT_ADMIN_NAME", ADMIN_NAME)
-                .env("LIFIC_INIT_ADMIN_PASSWORD", ADMIN_PASSWORD)
+                .args(["start"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -157,155 +142,111 @@ fn boot_server(
 }
 
 #[test]
-fn init_if_missing_creates_an_authenticated_instance_with_the_env_admin() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    // A fresh, writable, empty "volume": the mount point exists, the database
-    // inside it does not.
-    let data = dir.path().join("data");
-    std::fs::create_dir(&data).expect("create data dir");
-    let db_path = data.join("lific.db");
-    let config = write_config(dir.path(), &db_path, free_port());
-
-    // Plain `start` on the same fresh volume must still refuse.
-    let refused = lific(&config)
-        .arg("start")
+fn personal_init_and_restart_override_old_login_and_signup_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let database = root.join("lific.db");
+    let config = write_config(&root, &database, free_port());
+    let output = lific(&config)
+        .args(["init", "--no-service", "--name", "Personal test", "--json"])
         .output()
-        .expect("run plain start");
+        .unwrap();
     assert!(
-        !refused.status.success(),
-        "plain start must not create a database"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        stderr.contains("no Lific instance found"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(!db_path.exists(), "the refusal created a database");
-
+    // Simulate an old database with login/signup enabled and a second person's
+    // session. Startup preserves historical identities but retires that session.
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute(
+            "UPDATE instance_settings SET allow_signup = 1, web_auto_login = 0",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO users (username, email, password_hash, display_name, is_admin, is_bot) SELECT 'historical', 'historical@local', password_hash, 'Historical author', 0, 0 FROM users LIMIT 1", []).unwrap();
+        let historical = conn.last_insert_rowid();
+        conn.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES ('old-session-hash', ?1, datetime('now', '+1 day'))", [historical]).unwrap();
+    }
     let client = client();
-    let (server, port) = boot_server(dir.path(), &db_path, &client);
+    let (_server, port) = boot_server(&root, &database, &client);
     let base = format!("http://127.0.0.1:{port}");
-    assert!(db_path.exists(), "first boot did not create the database");
-
-    // The admin exists, signup is closed, and auto-login (which would imply
-    // auth is off) is not on. An open instance with no users hands admin to
-    // whoever loads the page first.
-    let instance: serde_json::Value = client
-        .get(format!("{base}/api/instance"))
+    let response = client
+        .post(format!("{base}/api/auth/auto-login"))
         .send()
-        .expect("GET /api/instance")
-        .json()
-        .expect("instance json");
-    assert_eq!(instance["has_users"], true, "no admin was created");
-    assert_eq!(instance["allow_signup"], false, "signup was left open");
+        .unwrap();
+    assert!(response.status().is_success());
+    let session: serde_json::Value = response.json().unwrap();
+    assert_eq!(session["user"]["username"], "personal-test");
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let policy: (bool, bool) = conn
+        .query_row(
+            "SELECT allow_signup, web_auto_login FROM instance_settings",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(policy, (false, true));
+    let historical: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM users WHERE username = 'historical'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(historical, 1, "keep authorship history");
+    let old_sessions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE token = 'old-session-hash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_sessions, 0);
+    for path in [
+        "/api/auth/login",
+        "/api/auth/signup",
+        "/api/users",
+        "/oauth/register",
+    ] {
+        assert_eq!(
+            client
+                .post(format!("{base}{path}"))
+                .send()
+                .unwrap()
+                .status()
+                .as_u16(),
+            404,
+            "{path}"
+        );
+    }
     assert_eq!(
-        instance["web_auto_login"], false,
-        "auth must stay required on first boot"
-    );
-
-    // Anonymous access is refused: the flag does not weaken auth.
-    let anonymous = client
-        .get(format!("{base}/api/projects"))
-        .send()
-        .expect("GET /api/projects");
-    assert_eq!(anonymous.status().as_u16(), 401, "anonymous read allowed");
-
-    // The env credentials really do sign in.
-    let login = client
-        .post(format!("{base}/api/auth/login"))
-        .json(&serde_json::json!({
-            "identity": ADMIN_USERNAME,
-            "password": ADMIN_PASSWORD,
-        }))
-        .send()
-        .expect("POST /api/auth/login");
-    assert!(
-        login.status().is_success(),
-        "login failed: {}",
-        login.status()
-    );
-
-    // A wrong password is still a wrong password.
-    let bad = client
-        .post(format!("{base}/api/auth/login"))
-        .json(&serde_json::json!({
-            "identity": ADMIN_USERNAME,
-            "password": "not-the-password",
-        }))
-        .send()
-        .expect("POST /api/auth/login");
-    assert!(!bad.status().is_success(), "wrong password was accepted");
-
-    drop(server);
-}
-
-#[test]
-fn init_if_missing_refuses_to_create_a_database_with_no_admin_credentials() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let data = dir.path().join("data");
-    std::fs::create_dir(&data).expect("create data dir");
-    let db_path = data.join("lific.db");
-    let config = write_config(dir.path(), &db_path, free_port());
-
-    let output = lific(&config)
-        .args(["start", "--init-if-missing"])
-        .output()
-        .expect("run start");
-
-    assert!(
-        !output.status.success(),
-        "a database with no admin must not be created"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("LIFIC_INIT_ADMIN_NAME"), "{stderr}");
-    assert!(stderr.contains("LIFIC_INIT_ADMIN_PASSWORD"), "{stderr}");
-    assert!(!db_path.exists(), "the refusal created a database");
-}
-
-#[test]
-fn init_if_missing_refuses_half_a_pair_of_admin_variables() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let data = dir.path().join("data");
-    std::fs::create_dir(&data).expect("create data dir");
-    let db_path = data.join("lific.db");
-    let config = write_config(dir.path(), &db_path, free_port());
-
-    let output = lific(&config)
-        .args(["start", "--init-if-missing"])
-        .env("LIFIC_INIT_ADMIN_NAME", ADMIN_NAME)
-        .output()
-        .expect("run start");
-
-    assert!(!output.status.success(), "half a pair must refuse");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("LIFIC_INIT_ADMIN_PASSWORD"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(
-        !db_path.exists(),
-        "a refused first boot must leave no database behind"
+        client
+            .get(format!("{base}/api/projects"))
+            .bearer_auth("old-key")
+            .send()
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
     );
 }
 
 #[test]
-fn init_if_missing_refuses_a_missing_mount_point() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    // The volume was never mounted: the parent directory does not exist.
-    let data = dir.path().join("data");
-    let db_path = data.join("lific.db");
-    let config = write_config(dir.path(), &db_path, free_port());
-
+fn start_needs_explicit_personal_initialization() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let database = root.join("missing.db");
+    let config = write_config(&root, &database, free_port());
+    let output = lific(&config).arg("start").output().unwrap();
+    assert!(!output.status.success());
+    assert!(!database.exists());
     let output = lific(&config)
         .args(["start", "--init-if-missing"])
         .output()
-        .expect("run start");
-
-    assert!(!output.status.success(), "missing mount point must refuse");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("does not exist"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(!data.exists(), "the mount point must not be created");
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
+    assert!(!database.exists());
 }

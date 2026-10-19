@@ -851,6 +851,7 @@ pub enum TokenSource {
 }
 
 impl TokenSource {
+    #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
             TokenSource::Env => "LIFIC_TOKEN env",

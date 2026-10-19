@@ -46,7 +46,7 @@
       const user = await me();
       if (!live()) return;
       if (user.ok && user.data.id === owner) saveArchiveDownload(result.blob, result.filename);
-      else error = "Your account changed. Download the archive again after signing in.";
+      else error = "The local session refreshed. Try downloading the archive again.";
     }
     if (!result.ok) error = result.error;
     busy = false;
@@ -57,11 +57,11 @@
   <section aria-labelledby="archive-transfer-heading" class="border-t border-[var(--border)] pt-6 space-y-3">
     <h2 id="archive-transfer-heading" class="text-body-sm font-semibold text-[var(--text)]">Project archive</h2>
     <p class="text-body-sm text-[var(--text-muted)]">
-      Copy this whole project to another Lific instance. The archive includes linked files,
+      Save this whole project as a local archive file. The archive includes linked files,
       history, deleted content and author names. It can contain sensitive text no longer visible
-      in the project. Accounts and permissions are not included; author names transfer as text only.
+      in the project. Author names are included as history.
     </p>
-    <p class="text-body-sm text-[var(--text-muted)]">Downloading leaves this project untouched. Importing creates a private project, never a merge.</p>
+    <p class="text-body-sm text-[var(--text-muted)]">Downloading leaves this project untouched. Importing creates a new local project.</p>
     <label class="flex items-start gap-2 text-body-sm text-[var(--text)]">
       <input type="checkbox" bind:checked={confirmed} disabled={busy} class="mt-1 accent-[var(--accent)]" />
       I understand this archive includes history and deleted content.

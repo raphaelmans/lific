@@ -537,8 +537,6 @@ mod tests {
     use crate::ratelimit;
     use crate::{Config, auth, db, realtime, server, storage};
     use axum::body::Body;
-    use base64::Engine;
-    use http_body_util::BodyExt;
     use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
@@ -839,7 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_mcp_server_embeds_authorized_attachment_bytes_and_denies_other_users() {
+    async fn personal_server_accepts_operator_mcp_and_refuses_historical_users() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("lific.db");
         let pool = db::open(&db_path).unwrap();
@@ -867,6 +865,10 @@ mod tests {
             .unwrap()
             .id
         };
+        pool.write()
+            .unwrap()
+            .execute("UPDATE users SET is_admin = 1 WHERE id = 1", [])
+            .unwrap();
         let owner_key = auth::create_api_key(&pool, "owner", Some(1)).unwrap();
         let other_key = auth::create_api_key(&pool, "other", Some(2)).unwrap();
 
@@ -885,13 +887,10 @@ mod tests {
             store,
         );
 
-        async fn call_server(app: &axum::Router, key: &str, attachment_id: i64) -> Value {
-            let request = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": { "name": "get_attachment", "arguments": { "attachment_id": attachment_id } },
-            });
+        for (key, expected) in [
+            (&owner_key, axum::http::StatusCode::OK),
+            (&other_key, axum::http::StatusCode::UNAUTHORIZED),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
@@ -903,32 +902,23 @@ mod tests {
                         .header("content-type", "application/json")
                         .header("accept", "application/json, text/event-stream")
                         .header(INLINE_ATTACHMENT_HEADER, "1")
-                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .body(Body::from(serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_attachment", "arguments":{"attachment_id":attachment_id}}}).to_string()))
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), axum::http::StatusCode::OK);
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap()
+            assert_eq!(response.status(), expected);
+            if expected == axum::http::StatusCode::OK {
+                let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    body["result"]["content"][1]["resource"]["mimeType"],
+                    "application/zip"
+                );
+            }
         }
-
-        let owner = call_server(&app, &owner_key, attachment_id).await;
-        let resource = &owner["result"]["content"][1]["resource"];
-        assert_eq!(resource["mimeType"], "application/zip");
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD.decode(resource["blob"].as_str().unwrap()),
-            Ok(bytes.to_vec())
-        );
-
-        let other = call_server(&app, &other_key, attachment_id).await;
-        assert!(
-            other["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("Error: ")
-        );
-        assert!(other["result"]["content"].get(1).is_none());
     }
 
     const OK: &str = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;

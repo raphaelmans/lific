@@ -11,6 +11,7 @@
 
   import {
     me,
+    getWorkspace,
     listProjects,
     listIssues,
     listAllPages,
@@ -56,7 +57,7 @@
     Bot,
   } from "lucide-svelte";
   import { projectCodeOf } from "../lib/references";
-  import { getContext } from "svelte";
+  import { getContext, onMount } from "svelte";
   import { startAutoRefresh } from "../lib/autoRefresh.svelte";
 
   const topbarCtx = getContext<{
@@ -85,6 +86,8 @@
   const visitSince = recordHomeVisit();
   const sinceIso = visitSince === null ? null : new Date(visitSince).toISOString();
 
+  let workspaceName = $state("");
+  onMount(() => { getWorkspace().then(result => { if (result.ok) workspaceName = result.data.name; }); });
   let user = $state<AuthUser | null>(null);
   let projects = $state<Project[]>([]);
   /** LIF-506: what needs the signed-in person. Null until loaded or when
@@ -385,7 +388,7 @@
 
 {#snippet topbarContent()}
   <div class="flex items-center gap-3 px-6 py-2 w-full">
-    <span class="text-body-sm font-medium text-[var(--text)]">Home</span>
+    <span class="text-body-sm font-medium text-[var(--text)]">{workspaceName || "Home"}</span>
   </div>
 {/snippet}
 
@@ -464,6 +467,7 @@
               <GreetIcon size={20} />
             </span>
             <div class="min-w-0">
+              {#if workspaceName}<p class="text-body-sm text-[var(--text-muted)] mb-2">{workspaceName}</p>{/if}
               <h1 class="font-display text-title tracking-tight text-[var(--text)] leading-none">
                 {greeting}{user ? `, ${user.display_name || user.username}` : ""}
               </h1>

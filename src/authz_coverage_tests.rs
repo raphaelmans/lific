@@ -132,6 +132,15 @@ fn rest_manifest() -> HashMap<(&'static str, &'static str), Classification> {
     const PUBLIC: &str = "unauthenticated by design (auth screen / health check)";
 
     HashMap::from([
+        (
+            ("GET", "/api/workspace"),
+            Exempt("local workspace metadata, protected by personal loopback policy"),
+        ),
+        (
+            ("PATCH", "/api/workspace"),
+            Exempt("name-only mutation requiring a recent primary-operator session"),
+        ),
+        (("POST", "/api/import-file"), Gated(Lead)),
         // ── Public / instance ──
         (("GET", "/api/instance"), Exempt(PUBLIC)),
         (

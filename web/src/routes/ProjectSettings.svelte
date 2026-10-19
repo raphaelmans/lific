@@ -7,9 +7,6 @@
     listProjects,
     listIssues,
     listProjectActivity,
-    listUsers,
-    me,
-    getInstance,
     getIssueCounts,
     updateProject,
     deleteProject,
@@ -22,20 +19,11 @@
     type Issue,
     type Activity,
     type IssueStatusCounts,
-    type UserSummary,
   } from "../lib/api";
-  import {
-    RECENT_AUTH_ERROR,
-    needsReauth,
-    reauthenticateWithoutPassword,
-    reauthenticateWithPassword,
-    retryOnceAfterReauth,
-  } from "../lib/reauth";
   import IconPicker from "../lib/IconPicker.svelte";
   import LabelManager from "../lib/LabelManager.svelte";
-  import ProjectMembers from "../lib/ProjectMembers.svelte";
-  import PublishPanel from "../lib/PublishPanel.svelte"; // LIF-465
   import ArchiveTransferPanel from "../lib/ArchiveTransferPanel.svelte";
+  import OfflineImport from "../lib/OfflineImport.svelte";
   import { loadListState, saveListState } from "../lib/issues/persistence";
   import { ageLabel, daysSince, importanceScore } from "../lib/issues/importance";
   import ProjectIcon from "../lib/ProjectIcon.svelte";
@@ -55,7 +43,7 @@
   // LIF-234: role-aware affordance gating. `canManage` = lead/admin (or
   // enforcement off) — settings edits, danger zone, members, and import are
   // all lead-level. `canEdit` = maintainer/admin — label management.
-  import { projectRole, loadProjectRole, deriveCanPublish } from "../lib/projectRole.svelte";
+  import { projectRole, loadProjectRole } from "../lib/projectRole.svelte";
   import { toast } from "../lib/toast/toast.svelte";
 
   const topbarCtx = getContext<{
@@ -83,7 +71,6 @@
   let counts = $state<IssueStatusCounts | null>(null);
   let issues = $state<Issue[]>([]);
   let activity = $state<Activity[]>([]);
-  let users = $state<UserSummary[]>([]);
 
   // Inline-edit drafts
   let editingName = $state(false);
@@ -97,8 +84,6 @@
   let newIdent = $state("");
   let identError = $state("");
   let renaming = $state(false);
-  let leadValue = $state("");
-  let lastLead = $state<number | null>(null);
   let showDeleteSection = $state(false);
   let deleteConfirmText = $state("");
   let deleting = $state(false);
@@ -126,25 +111,13 @@
     // `canEdit` below reflect the correct answer (Layout also primes it, but
     // this makes the route self-sufficient and dedupes via the store cache).
     loadProjectRole(found.id);
-    leadValue = found.lead_user_id == null ? "" : String(found.lead_user_id);
-    lastLead = found.lead_user_id;
 
-    const [countsRes, issuesRes, actRes, usersRes, meRes, instanceRes] = await Promise.all([
-      getIssueCounts(found.id),
-      listIssues({ project_id: found.id, limit: 1000 }),
-      listProjectActivity(found.id, 14),
-      listUsers(),
-      // Who is signed in, and whether this instance signs in without a
-      // password: both decide how a refused lead assignment recovers.
-      me(),
-      getInstance(),
+    const [countsRes, issuesRes, actRes] = await Promise.all([
+      getIssueCounts(found.id), listIssues({ project_id: found.id, limit: 1000 }), listProjectActivity(found.id, 14),
     ]);
-    if (meRes.ok) currentUserId = meRes.data.id;
-    if (instanceRes.ok) webAutoLogin = instanceRes.data.web_auto_login;
     if (countsRes.ok) counts = countsRes.data;
     if (issuesRes.ok) issues = issuesRes.data;
     if (actRes.ok) activity = actRes.data.items;
-    if (usersRes.ok) users = usersRes.data;
     await loadGroups();
     loading = false;
   }
@@ -203,139 +176,6 @@
     if (project && v !== project.description) saveField("description", v);
   }
 
-  // ── Lead change (danger zone) ─────────────────────────────
-  //
-  // Naming a lead grants that person a `lead` membership on the project, so
-  // the server requires a sign-in from the last 15 minutes, exactly as adding
-  // a member does. Clearing the lead grants nothing and is never gated.
-  //
-  // The pending operation is a snapshot: `leadValue` is a live selector and
-  // `project` can be replaced by a reload, so a retry must not read either.
-  type PendingLead = {
-    projectId: number;
-    leadUserId: number;
-    previousLead: number | null;
-    userId: number;
-  };
-  let pendingLead = $state<PendingLead | null>(null);
-  let leadPassword = $state("");
-  let leadBusy = $state(false);
-  let leadError = $state("");
-  let autoLeadNote = $state("");
-  let webAutoLogin = $state(false);
-  let currentUserId = $state<number | null>(null);
-
-  /** Put the selector, and the effect's own guard, back to the stored lead.
-   *  Restoring only `leadValue` would leave `lastLead` holding the value that
-   *  was refused, so the effect would see them differ and immediately re-fire
-   *  the write it just abandoned. */
-  function restoreLead(previous: number | null) {
-    lastLead = previous;
-    leadValue = previous == null ? "" : String(previous);
-  }
-
-  async function autoLeadReauth() {
-    if (!webAutoLogin || currentUserId == null) {
-      return { ok: false as const, error: RECENT_AUTH_ERROR, recoverable: true };
-    }
-    const auto = await reauthenticateWithoutPassword(currentUserId);
-    if (!auto.ok) autoLeadNote = auto.error;
-    return auto;
-  }
-
-  async function assignLead(pending: PendingLead, recover = true): Promise<boolean> {
-    const res = await retryOnceAfterReauth(
-      () => updateProject(pending.projectId, { lead_user_id: pending.leadUserId }),
-      () =>
-        recover
-          ? autoLeadReauth()
-          : Promise.resolve({ ok: false as const, error: RECENT_AUTH_ERROR, recoverable: false }),
-    );
-    if (res.ok) {
-      if (project?.id === pending.projectId) {
-        project = res.data;
-        onProjectChange?.();
-        savedAt = Date.now();
-        window.setTimeout(() => { if (Date.now() - savedAt >= 1900) savedAt = 0; }, 2000);
-      }
-      return true;
-    }
-    if (needsReauth(res)) {
-      pendingLead = pending;
-      return false;
-    }
-    toast(`Couldn't save changes: ${res.error}`, { kind: "error" });
-    restoreLead(pending.previousLead);
-    return false;
-  }
-
-  /** Verify, then retry the interrupted assignment exactly once. */
-  async function submitLeadReauth() {
-    const pending = pendingLead;
-    if (!pending || leadBusy || !leadPassword || currentUserId == null) return;
-    if (pending.projectId !== project?.id || pending.userId !== currentUserId) {
-      leadError = "That change was interrupted and was not applied.";
-      pendingLead = null;
-      leadPassword = "";
-      return;
-    }
-    leadBusy = true;
-    leadError = "";
-    const refreshed = await reauthenticateWithPassword(leadPassword, pending.userId);
-    leadPassword = "";
-    if (!refreshed.ok) {
-      leadError = refreshed.error;
-      leadBusy = false;
-      return;
-    }
-    autoLeadNote = "";
-    if (await assignLead(pending, false)) {
-      pendingLead = null;
-    } else if (!leadError) {
-      leadError = "That still was not accepted. Sign out and sign back in, then try again.";
-      restoreLead(pending.previousLead);
-      pendingLead = null;
-    }
-    leadBusy = false;
-  }
-
-  function cancelLeadReauth() {
-    if (pendingLead) restoreLead(pendingLead.previousLead);
-    pendingLead = null;
-    leadPassword = "";
-    leadError = "";
-    autoLeadNote = "";
-  }
-
-  // Autosaves on select; guarded so the initial hydrate doesn't fire a write.
-  $effect(() => {
-    const v = leadValue;
-    if (!project) return;
-    if (pendingLead || leadBusy) return;
-    const next = v === "" ? null : Number(v);
-    if (next === lastLead) return;
-    const previous = lastLead;
-    lastLead = next;
-    if (next == null) {
-      // Clearing the lead is a reduction: no grant, no prompt.
-      const projectId = project.id;
-      leadBusy = true;
-      void saveField("lead_user_id", null)
-        .then((saved) => {
-          if (!saved && project?.id === projectId) restoreLead(previous);
-        })
-        .finally(() => { leadBusy = false; });
-      return;
-    }
-    leadBusy = true;
-    void assignLead({
-      projectId: project.id,
-      leadUserId: next,
-      previousLead: previous,
-      userId: currentUserId ?? -1,
-    }).finally(() => { leadBusy = false; });
-  });
-
   // ── Sidebar group ────────────────────────────────────────
   // Not a saveField: the group is per-user and rides its own endpoint, not
   // updateProject. Unlike Lead this autosaves on change rather than through
@@ -390,22 +230,6 @@
   // read-only overview.
   const canManage = $derived(projectRole.canManage);
 
-  // LIF-465: publication is NOT a `canManage` affordance. `canManage` is true
-  // for everyone while `authz_enforced` is off, but the server's publication
-  // gate is the Lead gate, the one check legacy mode still enforces. Showing
-  // the publish panel on `canManage` therefore offered a disclosure control to
-  // people the server would refuse. Derived from the real answer instead:
-  // instance admin, a `lead` membership, or the project's own lead pointer
-  // (which a pre-LIF-195 project can have without a membership row).
-  const canPublish = $derived(
-    deriveCanPublish({
-      role: projectRole.role,
-      enforced: projectRole.enforced,
-      isAdmin: projectRole.isAdmin,
-      isLead: project != null && currentUserId != null && project.lead_user_id === currentUserId,
-    }),
-  );
-
   function gotoOpenIssues() {
     navigate(`/${projectIdentifier}/issues`);
   }
@@ -430,11 +254,6 @@
   }
 
   // ── Danger zone actions ──────────────────────────────
-  let leadOptions = $derived([
-    { value: "", label: "No lead" },
-    ...users.map((u) => ({ value: String(u.id), label: u.display_name || u.username })),
-  ]);
-
   async function renameIdentifier() {
     if (!project) return;
     const nid = newIdent.trim().toUpperCase();
@@ -465,7 +284,7 @@
     archiving = true; archiveError = "";
     const res = await archiveProject(project.id);
     if (res.ok) {
-      toast(`Archived ${res.data.identifier}. An admin can unarchive it from Settings, Instance.`, { kind: "success" });
+      toast(`Archived ${res.data.identifier}. Restore it from Settings → Storage.`, { kind: "success" });
       navigate("/settings");
     } else {
       archiveError = res.error;
@@ -611,7 +430,7 @@
                      read-only, in the existing badge vocabulary. -->
                 <span class="inline-flex items-center gap-1 text-micro font-medium px-1.5 py-0.5 rounded-full
                              text-[var(--text-muted)] bg-[var(--bg-subtle)]"
-                      title="Only a project lead or admin can change project settings.">
+                      title="Project settings are temporarily unavailable.">
                   Read-only
                 </span>
               {/if}
@@ -753,29 +572,9 @@
           onOpenLabel={openLabelInIssues}
         />
 
-        <!-- ── MEMBERS (LIF-200) ────────────────────────── -->
-        <!-- LIF-234: members management is a lead-level operation. Hidden
-             entirely for non-leads (its own read-only-notice path was for the
-             flag-off era; now the whole panel only shows when manageable). -->
-        <!-- ── PUBLIC ISSUE VIEW (LIF-465) ──────────────── -->
-        <!-- Gated on `canPublish`, deliberately NOT on `canManage`: see the
-             derivation above. The panel is not in the danger zone either:
-             publishing is a normal thing to do deliberately, not a
-             destructive action, and burying it would bury its warning too. -->
-        {#if canPublish}
-          <PublishPanel
-            {project}
-            onChange={(updated) => { project = updated; }}
-          />
-          {#if project.identifier === projectIdentifier}
-            <ArchiveTransferPanel projectId={project.id} identifier={project.identifier} />
-          {/if}
-        {/if}
-
-        {#if canManage}
-          <ProjectMembers projectId={project.id} />
-
-
+        {#if canManage && project.identifier === projectIdentifier}
+          <ArchiveTransferPanel projectId={project.id} identifier={project.identifier} />
+          <OfflineImport project={project.identifier} onImported={onProjectChange} />
         {/if}
 
         <!-- ── RECENT ACTIVITY ──────────────────────────── -->
@@ -820,78 +619,6 @@
             <div class="border-t px-4 py-4 flex flex-col gap-5"
                  style="border-color: color-mix(in oklab, var(--error) 25%, transparent)">
 
-              <!-- Project lead -->
-              <div class="flex items-center gap-3">
-                <div class="flex-1">
-                  <p class="text-body-sm font-medium text-[var(--text)]">Project lead</p>
-                  <p class="text-caption text-[var(--text-muted)]">Who owns this project.</p>
-                </div>
-                <select
-                  bind:value={leadValue}
-                  disabled={pendingLead !== null || leadBusy}
-                  class="text-body-sm rounded-md border border-[var(--border)] bg-[var(--surface)]
-                         text-[var(--text)] px-2.5 py-1.5 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                >
-                  {#each leadOptions as o}
-                    <option value={o.value}>{o.label}</option>
-                  {/each}
-                </select>
-              </div>
-
-              <!-- Naming a lead grants that person a lead membership, so the
-                   server wants a recent sign-in. Confirm inline, right under
-                   the control that was refused. -->
-              {#if pendingLead}
-                <div class="flex flex-col gap-2 rounded-md bg-[var(--bg-subtle)] px-3 py-2.5">
-                  <p class="text-caption text-[var(--text)] leading-relaxed">
-                    Verify it's you to make that person the project lead. It grants them lead
-                    access to this project, and you have been signed in for a while.
-                  </p>
-                  {#if autoLeadNote}
-                    <p class="text-caption text-[var(--text-muted)]" role="status">
-                      Signing you in automatically did not work ({autoLeadNote}).
-                    </p>
-                  {/if}
-                  {#if leadError}
-                    <p class="text-caption text-[var(--error)]" role="alert">{leadError}</p>
-                  {/if}
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <label class="flex-1 min-w-[170px]">
-                      <span class="sr-only">Your current password</span>
-                      <input
-                        bind:value={leadPassword}
-                        type="password"
-                        placeholder="your current password"
-                        autocomplete="current-password"
-                        disabled={leadBusy}
-                        class="w-full px-3 py-1.5 text-body-sm rounded-md border border-[var(--border)]
-                               bg-[var(--bg)] text-[var(--text)] outline-none focus-visible:ring-2
-                               focus-visible:ring-[var(--accent)] disabled:opacity-50"
-                        onkeydown={(e) => { if (e.key === 'Enter') submitLeadReauth(); }}
-                      />
-                    </label>
-                    <button
-                      class="text-body-sm font-medium text-[var(--btn-success-text)] bg-[var(--btn-success)]
-                             px-3 py-1.5 rounded-md hover:bg-[var(--btn-success-hover)] transition-colors
-                             disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-                      disabled={leadBusy || !leadPassword}
-                      onclick={submitLeadReauth}
-                    >
-                      {leadBusy ? "Verifying…" : "Confirm and continue"}
-                    </button>
-                    <button
-                      class="text-body-sm text-[var(--text-muted)] px-3 py-1.5 rounded-md hover:bg-[var(--surface)] transition-colors disabled:opacity-50 shrink-0"
-                      disabled={leadBusy}
-                      onclick={cancelLeadReauth}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              {/if}
-
-              <div class="h-px" style="background: color-mix(in oklab, var(--error) 18%, transparent)"></div>
-
               <!-- Change identifier -->
               <div>
                 <p class="text-body-sm font-medium text-[var(--text)]">Change identifier</p>
@@ -926,7 +653,7 @@
                 <p class="text-body-sm font-medium text-[var(--text)]">Archive project</p>
                 <p class="text-caption text-[var(--text-muted)] mt-0.5 leading-relaxed">
                   Compresses the project into a single file on the server and removes it from Lific.
-                  Nothing is lost: an instance admin can unarchive it from Settings, Instance.
+                  Nothing is lost: you can restore it from Settings → Storage.
                 </p>
                 {#if !showArchiveSection}
                   <button
@@ -939,7 +666,7 @@
                   <p class="text-caption text-[var(--text-muted)] mt-2 mb-2 leading-relaxed">
                     <strong class="font-mono">{project.identifier}</strong> and its <strong>{total}</strong> issue{total !== 1 ? 's' : ''},
                     pages, plans, and attachments disappear for everyone until it is unarchived. It comes back private, with its
-                    members and history. Page revision history, saved views, and repository bindings are not kept.
+                    history. Page revision history, saved views, and repository bindings are not kept.
                   </p>
                   <div class="flex items-center gap-2">
                     <button

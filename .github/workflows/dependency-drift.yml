@@ -4,10 +4,16 @@ name: Dependency drift
 # and resolves the newest versions Cargo.toml allows. A dependency that breaks
 # its API within a semver range (rmcp 1.7 did, breaking 2.10.0 on crates.io)
 # passes every locked check while the published crate fails to install. This
-# builds against a fresh resolution when explicitly dispatched. Automatic
-# network jobs are disabled for this local-only fork.
+# checks a fresh resolution on GitHub. This development job is separate
+# from the local application and never receives a workspace database.
 
 on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: "17 9 * * 1"
   workflow_dispatch:
 
 permissions:

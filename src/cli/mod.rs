@@ -654,6 +654,18 @@ pub enum ServiceAction {
 
 #[derive(Subcommand)]
 pub enum ImportAction {
+    /// Import a provider JSON export from a local file only.
+    File {
+        file: PathBuf,
+        #[arg(long, value_enum)]
+        source: crate::import::file::Source,
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Import GitHub repo issues (filters out pull requests).
     Github {
         /// Source repo as owner/name (e.g. octocat/hello).

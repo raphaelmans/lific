@@ -137,38 +137,26 @@ export async function checkDiscordFeedback(context: BrowserContext, base: string
   try {
     await page.setViewportSize({ width: 390, height: 900 });
     await page.goto(`${base}/settings`);
-    for (const id of ["codex-laptop", "codex-desktop", "custom-agent"]) {
-      await page.getByRole("button", { name: "Add custom or named connection" }).click();
-      await page.getByLabel("Config template").selectOption(id.startsWith("codex") ? "codex" : "");
-      await page.getByLabel("Connection ID", { exact: true }).fill(id);
-      await page.getByLabel("Display name (optional)").fill(id);
-      await page.getByRole("button", { name: "Connect agent", exact: true }).click();
-      const dialog = page.getByRole("dialog");
-      await dialog.getByRole("button", { name: "Copy key", exact: true }).waitFor();
-      if (id === "custom-agent") {
-        assert((await dialog.innerText()).includes("HTTP MCP settings"));
-        assert(!(await dialog.innerText()).includes("same everywhere"));
-      }
-      await dialog.getByRole("button", { name: "Done", exact: true }).click();
-    }
+    await page.getByRole("heading", { name: "Personal workspace", exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Add custom or named connection" }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: /Connect agent|Copy key|Sign out/ }).count(), 0);
+    assert.equal(await page.locator('input[type="password"]').count(), 0);
+    assert((await page.locator("body").innerText()).includes("lific mcp"));
+    const name = page.getByLabel("Display name", { exact: true });
+    const originalName = await name.inputValue();
+    await name.fill("Personal smoke operator");
+    await page.getByRole("button", { name: "Save name", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "Saved." }).waitFor();
     await page.reload();
-    const laptop = page.locator('[data-connection-id="codex-laptop"]');
-    const desktop = page.locator('[data-connection-id="codex-desktop"]');
-    await laptop.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await laptop.getByRole("button", { name: "Reconnect", exact: true }).waitFor();
-    assert(await desktop.getByRole("button", { name: "Disconnect", exact: true }).isVisible());
-    await laptop.getByRole("button", { name: "Reconnect", exact: true }).click();
-    await page.getByRole("dialog").getByRole("button", { name: "Copy key", exact: true }).waitFor();
-    await page.getByRole("dialog").getByRole("button", { name: "Done", exact: true }).click();
-    assert.equal(await laptop.count(), 1);
-    await laptop.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await laptop.getByRole("button", { name: "Remove", exact: true }).click();
-    await laptop.waitFor({ state: "detached" });
-    assert(await desktop.getByRole("button", { name: "Disconnect", exact: true }).isVisible());
+    await page.waitForFunction(() =>
+      (document.querySelector("#local-name") as HTMLInputElement)?.value === "Personal smoke operator");
+    await name.fill(originalName);
+    await page.getByRole("button", { name: "Save name", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "Saved." }).waitFor();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     if (process.env.LIFIC_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.LIFIC_SCREENSHOT_DIR, "lific-discord-tools-390.png"), fullPage: true });
     assert.equal(errors.length, 0, errors.join("\n"));
-    console.log("ok   Discord custom/named connection lifecycle (390px)");
+    console.log("ok   Personal settings persistence and removed account/remote controls (390px)");
   } finally {
     await page.close();
   }

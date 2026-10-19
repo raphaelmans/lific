@@ -22,7 +22,7 @@
       : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'}"
     onclick={() => navigate("/settings")}
   >
-    Account
+    Preferences
   </button>
   {#if isAdmin}
     <button
@@ -32,7 +32,7 @@
         : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'}"
       onclick={() => navigate("/settings/instance")}
     >
-      Instance
+      Storage
     </button>
   {/if}
 </div>

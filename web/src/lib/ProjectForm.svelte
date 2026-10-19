@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { listUsers, listProjectGroups, type UserSummary, type ProjectGroup } from "./api";
+  import { listProjectGroups, type ProjectGroup } from "./api";
   import IconPicker from "./IconPicker.svelte";
   import Select from "./Select.svelte";
 
@@ -8,7 +8,6 @@
     identifier = $bindable(""),
     description = $bindable(""),
     emoji = $bindable(""),
-    leadUserId = $bindable<number | null>(null),
     groupId = $bindable<number | null>(null),
     mode = "create",
     identifierLocked = false,
@@ -17,7 +16,6 @@
     identifier?: string;
     description?: string;
     emoji?: string;
-    leadUserId?: number | null;
     /** Sidebar group to file the project into. The form only collects it —
      *  persisting it is the caller's job, since it rides a separate endpoint. */
     groupId?: number | null;
@@ -25,14 +23,10 @@
     identifierLocked?: boolean;
   } = $props();
 
-  let users = $state<UserSummary[]>([]);
   let groups = $state<ProjectGroup[]>([]);
   let identifierTouched = $state(false);
 
   $effect(() => {
-    listUsers().then((res) => {
-      if (res.ok) users = res.data;
-    });
     listProjectGroups().then((res) => {
       if (res.ok) groups = res.data;
     });
@@ -72,25 +66,6 @@
     ...groups.map((g) => ({ value: g.id, label: g.name })),
   ]);
 
-  let userOptions = $derived([
-    { value: null, label: "No lead" },
-    ...users.map((u) => ({
-      value: u.id,
-      label: u.display_name || u.username,
-      username: u.username,
-      is_admin: u.is_admin,
-      created_at: u.created_at,
-    })),
-  ]);
-
-  function formatMemberSince(iso: string): string {
-    const d = new Date(iso + "Z");
-    return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
-  }
-
-  function userInitials(name: string): string {
-    return name.split(/[\s_-]+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("");
-  }
 </script>
 
 <div class="max-w-[560px] mx-auto px-6 pt-12 md:pt-16">
@@ -116,7 +91,7 @@
     />
   </div>
 
-  <!-- Identifier + Lead + Icon row -->
+  <!-- Identifier + Icon row -->
   <div class="flex gap-5 items-start mb-8">
     <div class="shrink-0">
       <label
@@ -155,21 +130,6 @@
       </span>
     </div>
 
-    <div class="flex-1">
-      <label
-        class="block text-body-sm font-medium text-[var(--text)] mb-2"
-      >
-        Lead
-      </label>
-      <Select
-        options={userOptions}
-        bind:value={leadUserId}
-        placeholder="No lead"
-        renderSelected={selectedUser}
-        renderOption={userOption}
-      />
-    </div>
-
     <div>
       <label
         class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit"
@@ -181,7 +141,7 @@
   </div>
 
   {#if groups.length > 0}
-    <!-- Sidebar grouping. Personal to the signed-in user, unlike Lead. -->
+    <!-- Sidebar grouping. Personal project organization. -->
     <div class="mb-8 max-w-xs">
       <label class="block text-body-sm font-medium text-[var(--text)] mb-2 w-fit">
         Group
@@ -214,56 +174,3 @@
     ></textarea>
   </div>
 </div>
-
-{#snippet selectedUser(opt: { value: string | number | null; label: string; [key: string]: unknown })}
-  <div class="flex items-center gap-2">
-    {#if opt.value !== null}
-      <div
-        class="size-5 rounded-full bg-[var(--accent)] text-[var(--accent-text)]
-               flex items-center justify-center text-micro font-semibold shrink-0"
-      >
-        {userInitials(opt.label)}
-      </div>
-    {/if}
-    <span class="text-body-lg text-[var(--text)]">{opt.label}</span>
-  </div>
-{/snippet}
-
-{#snippet userOption(opt: { value: string | number | null; label: string; [key: string]: unknown }, isSelected: boolean)}
-  {#if opt.value === null}
-    <span class="text-body text-[var(--text-faint)]">{opt.label}</span>
-  {:else}
-    <div class="flex items-center gap-2.5">
-      <div
-        class="size-7 rounded-full flex items-center justify-center
-               text-micro font-semibold shrink-0
-               {isSelected
-          ? 'bg-[var(--accent)] text-[var(--accent-text)]'
-          : 'bg-[var(--bg-subtle)] text-[var(--text-muted)]'}"
-      >
-        {userInitials(opt.label)}
-      </div>
-      <div class="min-w-0">
-        <div class="flex items-center gap-1.5">
-          <span
-            class="text-body truncate
-                   {isSelected ? 'text-[var(--accent)] font-medium' : 'text-[var(--text)]'}"
-          >
-            {opt.label}
-          </span>
-          {#if opt.is_admin}
-            <span
-              class="text-micro font-semibold uppercase tracking-wide
-                     px-1 py-0.5 rounded bg-[var(--accent-subtle)] text-[var(--accent)]"
-            >
-              Admin
-            </span>
-          {/if}
-        </div>
-        <span class="text-caption text-[var(--text-faint)]">
-          Member since {formatMemberSince(opt.created_at as string)}
-        </span>
-      </div>
-    </div>
-  {/if}
-{/snippet}

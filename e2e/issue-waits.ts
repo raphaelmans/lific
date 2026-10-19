@@ -20,6 +20,7 @@ export async function checkIssueWaits(context: BrowserContext, base: string, use
   page.on("pageerror", (err) => errors.push(String(err)));
   try {
     await page.goto(`${base}/DEMO/issues/DEMO-1`);
+    await page.waitForFunction(() => !!localStorage.getItem("lific_token"));
     const identifier = await page.evaluate(async () => {
       const headers = {
         Authorization: `Bearer ${localStorage.getItem("lific_token")}`,

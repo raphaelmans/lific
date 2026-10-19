@@ -209,8 +209,8 @@ impl AuthConfig {
 /// internal jargon like "credential-less request".
 pub fn login_free_caution() -> &'static str {
     "LIFIC is running in login-free mode: anyone who can reach it can administer \
-     it. Keep it on a machine only you and trusted people can reach. To switch \
-     to passwords, set [auth] required = true and run lific init again."
+     it. Keep it on a machine only you and trusted people can reach. This personal \
+     fork always uses loopback and does not offer password login."
 }
 
 /// The two auth modes an operator can choose at `lific init` (LIFIC-25).
@@ -1174,8 +1174,9 @@ trusted_proxies = ["not-a-cidr"]
         assert!(text.contains("anyone who can reach it can administer it"));
         // States the safe condition.
         assert!(text.contains("Keep it on a machine only you and trusted people can reach"));
-        // States the recovery path.
-        assert!(text.contains("required = true"));
+        // Personal mode cannot be switched back to password login.
+        assert!(text.contains("does not offer password login"));
+        assert!(!text.contains("required = true"));
         // No shock all-caps language is allowed to leak back in from the old
         // "AUTH IS DISABLED" warning.
         assert!(!text.contains("AUTH IS DISABLED"));

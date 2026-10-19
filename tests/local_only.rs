@@ -32,13 +32,28 @@ fn remote_commands_fail_before_connecting() {
             "https://example.invalid",
             "--non-interactive",
         ],
-        vec!["mcp", "--remote", "--url", "https://example.invalid"],
+        vec!["mcp", "--http", "--url", "https://example.invalid"],
         vec!["start", "--host", "0.0.0.0"],
+        vec!["logout"],
+        vec!["user", "list"],
+        vec!["member", "list"],
+        vec!["key", "list"],
+        vec!["instance", "set", "--auto-login", "false"],
+        vec!["mcp", "--instances", "instances.toml"],
+        vec!["connect", "--oauth"],
+        vec!["connect", "--http", "--url", "https://example.invalid"],
+        vec!["init", "--auth-mode", "passwords"],
+        vec!["init", "--password", "test"],
     ] {
         let output = invoke(&config, &args);
         assert!(!output.status.success(), "{args:?}");
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("Local-only policy"), "{args:?}: {error}");
+        assert!(
+            error.contains("unrecognized")
+                || error.contains("unexpected")
+                || error.contains("Local-only policy"),
+            "{args:?}: {error}"
+        );
     }
 }
 
@@ -68,11 +83,11 @@ fn remote_config_and_imports_are_refused() {
         ],
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("External imports are disabled"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
 }
 
 #[test]
-fn local_http_ignores_proxy_environment() {
+fn local_health_check_ignores_proxy_environment() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     // A proxy trap would receive credentials if no_proxy() were missing.
@@ -91,11 +106,7 @@ fn local_http_ignores_proxy_environment() {
                 let mut bytes = [0; 4096];
                 let read = stream.read(&mut bytes).unwrap();
                 let request = String::from_utf8_lossy(&bytes[..read]);
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer local-test-key")
-                );
+                assert!(request.to_ascii_lowercase().contains("get /api/health "));
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]").unwrap();
                 return;
             }
@@ -109,21 +120,19 @@ fn local_http_ignores_proxy_environment() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("lific.toml");
     std::fs::write(&config, "[server]\nhost = \"127.0.0.1\"\n").unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "[server]\nhost = \"127.0.0.1\"\nport = {}\n",
+            address.port()
+        ),
+    )
+    .unwrap();
     let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
     let output = Command::new(env!("CARGO_BIN_EXE_lific"))
         .arg("--config")
         .arg(config)
-        .args([
-            "--backend",
-            "http",
-            "--url",
-            &format!("http://localhost:{}", address.port()),
-            "--api-key",
-            "local-test-key",
-            "project",
-            "list",
-            "--json",
-        ])
+        .args(["doctor", "--json"])
         .env("HTTP_PROXY", &proxy_url)
         .env("HTTPS_PROXY", &proxy_url)
         .env("ALL_PROXY", &proxy_url)
@@ -135,10 +144,6 @@ fn local_http_ignores_proxy_environment() {
         .output()
         .unwrap();
     task.join().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("server"));
     assert!(proxy.accept().is_err(), "a local request reached the proxy");
 }

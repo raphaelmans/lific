@@ -75,7 +75,7 @@ Bun.serve({
     return html(mode !== "no-assets");
   },
 });
-console.error("lific server started");
+console.error("personal web app started");
 TS
 
 # A stand-in binary. It refuses to start the way the real one would fail if the
@@ -124,7 +124,7 @@ if ! grep -q '^\[database\]' "$config"; then
   exit 1
 fi
 
-echo "lific server started" >&2
+echo "personal web app started" >&2
 exec env PORT="${port:?}" MODE="${FIXTURE_MODE:-full}" bun "$FIXTURE_SERVER"
 SH
 chmod +x "$fixture_binary"
@@ -208,7 +208,7 @@ echo "a hostile working directory and its lific.toml are not inherited"
 no_response_server="$scratch/no-response-server.ts"
 printf '%s\n' \
   'Bun.serve({ port: Number(process.env.PORT), fetch: () => new Promise(() => {}) });' \
-  'console.error("lific server started");' \
+  'console.error("personal web app started");' \
   'console.error("no-response fixture listening");' \
   >"$no_response_server"
 

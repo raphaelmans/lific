@@ -20,6 +20,8 @@ mod links;
 mod mcp;
 mod network;
 mod oauth;
+mod personal;
+mod personal_cli;
 mod preview;
 mod project_archive;
 mod ratelimit;
@@ -422,9 +424,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Via `ArgMatches` rather than `Cli::parse()` so a value's source stays
     // answerable: `lific mcp --instances` rejects a typed `--url` but ignores
     // an exported `LIFIC_URL`. Behaviour is otherwise identical.
-    let matches = Cli::command().get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
-        Ok(cli) => cli,
+    let matches = personal_cli::PersonalCli::command().get_matches();
+    let cli: Cli = match personal_cli::PersonalCli::from_arg_matches(&matches) {
+        Ok(cli) => cli.into(),
         Err(error) => error.exit(),
     };
 
@@ -447,7 +449,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Shell completions must work with no lific.toml present and touch no DB,
     // so handle them before loading config or opening the database.
     if let Command::Completion { shell } = cli.command {
-        clap_complete::generate(shell, &mut Cli::command(), "lific", &mut std::io::stdout());
+        clap_complete::generate(
+            shell,
+            &mut personal_cli::PersonalCli::command(),
+            "lific",
+            &mut std::io::stdout(),
+        );
         return Ok(());
     }
 
@@ -485,6 +492,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     network::validate_server(&cfg)?;
+    personal::configure(&mut cfg);
     if let Command::Start {
         host: Some(host), ..
     } = &cli.command
@@ -506,20 +514,17 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let url = http_backend_url(cli.url.as_deref(), cfg.server.public_url.as_deref(), &cfg);
         network::local_url(&url)?;
-        // LIF-408: `--api-key`/`LIFIC_API_KEY` still wins, then the stored
-        // credential for `url`. `credentials::load` will only hand back a
-        // `LIFIC_TOKEN` when `LIFIC_URL` names the same origin as `url`, so a
-        // cwd `lific.toml` (or a `--url`) pointing at another server cannot
-        // make us send the env token there.
-        let api_key =
-            cli::resolve_http_credential(cli.api_key.as_deref(), || cli::credentials::load(&url))?;
+        // Local agents need no human sign-in. A supplied token labels the tool;
+        // never revive stored upstream OAuth/login credentials implicitly.
+        let api_key = cli::resolve_http_credential(cli.api_key.as_deref(), || Ok(None))?;
         let json = cli::term::wants_json(cli.json);
         return cli::http::run(&cli.command, &url, api_key.as_deref(), json)
             .await
             .map_err(Into::into);
     }
 
-    if matches!(cli.command, Command::Import { .. }) {
+    if matches!(cli.command, Command::Import { ref action } if !matches!(action, cli::ImportAction::File { .. }))
+    {
         return Err(network::IMPORT_DISABLED.into());
     }
 
@@ -536,6 +541,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         // them via the process-default transport.
         actor::set_default_transport(actor::Transport::Cli);
         let pool = db::open(&cfg.database.path)?;
+        personal::prepare(&pool)?;
         // clispec.dev: honor explicit --json, and auto-upgrade to JSON when
         // stdout is piped/redirected so scripts and agents get machine output.
         let json = cli::term::wants_json(cli.json);
@@ -569,6 +575,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     project_archive::export(&pool, &store, &project, &out)?
                 }
                 cli::ProjectArchiveAction::Import { archive, user } => {
+                    let user = if user.is_empty() {
+                        personal::prepare(&pool)?
+                    } else {
+                        user
+                    };
                     project_archive::import(&pool, &store, &archive, &user)?
                 }
             };
@@ -782,7 +793,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             oauth,
             url,
             key,
-            user,
+            user: _,
             yes,
             dry_run,
             skip_agents,
@@ -804,6 +815,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // happens to run from — connect targets an EXISTING instance.
             cli::connect::ensure_instance_exists(&cfg)?;
             let pool = db::open(&cfg.database.path)?;
+            let operator = personal::prepare(&pool)?;
             actor::set_default_transport(actor::Transport::Cli);
 
             let args = cli::connect::ConnectArgs {
@@ -813,23 +825,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 oauth,
                 url,
                 key,
-                user,
+                user: Some(operator),
                 yes,
                 dry_run,
                 skip_agents,
             };
             if !json {
                 cli::ui::intro("lific connect");
-                // Say WHICH instance up front: the url clients will dial and
-                // the database keys are minted in. Running from the wrong
-                // directory must be obvious here, not after the writes.
                 cli::ui::info(format!(
-                    "Instance: {} {}",
-                    cli::ui::command(cli::connect::target_url(&args, &cfg)),
-                    cli::ui::dim(format!(
-                        "(keys minted in {})",
-                        cli::connect::absolute_db_path(&cfg)
-                    ))
+                    "Local database: {}",
+                    cli::connect::absolute_db_path(&cfg)
                 ));
             }
             let result = match cli::connect::run(&args, &cfg, &pool, &base) {
@@ -931,15 +936,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 .or(cli.url)
                 .map(|url| url.trim().to_owned())
                 .filter(|url| !url.is_empty())
-                .ok_or_else(|| -> Box<dyn std::error::Error> {
-                    "lific mcp --remote needs the instance to proxy to: pass --url <URL> or set \
-                     LIFIC_URL"
-                        .into()
-                })?;
+                .unwrap_or_else(|| http_backend_url(None, None, &cfg));
             network::local_url(&url)?;
-            let credential = cli::resolve_http_credential(cli.api_key.as_deref(), || {
-                cli::credentials::load(&url)
-            })?;
+            let credential = cli::resolve_http_credential(cli.api_key.as_deref(), || Ok(None))?;
             return cli::mcp_proxy::run(url, credential).await;
         }
 
@@ -957,6 +956,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
 
             let pool = db::open(&cfg.database.path)?;
+            personal::prepare(&pool)?;
             info!(path = %cfg.database.path.display(), "database ready");
 
             // LIFIC-18: a stdio agent carries its identity in LIFIC_TOKEN. Read
@@ -1235,13 +1235,16 @@ fn init_config_toml(
     db_flag: Option<&std::path::Path>,
     default_db: Option<&std::path::Path>,
 ) -> String {
-    match db_flag {
+    let initial = match db_flag {
         Some(db) => Config::default_toml_with_db(&config::absolutize(db)),
         None => match default_db {
             Some(db) => Config::default_toml_with_db(db),
             None => Config::default_toml(),
         },
-    }
+    };
+    let mut cfg: Config = toml::from_str(&initial).expect("default config parses");
+    personal::configure(&mut cfg);
+    toml::to_string_pretty(&cfg).expect("default personal config serializes")
 }
 
 /// Load the config file `init` operates on, applying the optional `--db`
@@ -1336,6 +1339,13 @@ async fn cmd_init(
     password_flag: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use cli::ui;
+    if auth_mode_flag
+        .as_deref()
+        .is_some_and(|mode| mode != "login-free")
+        || password_flag.is_some()
+    {
+        return Err("invalid --auth-mode: this personal fork only supports login-free use".into());
+    }
     // clap can't express this conflict: --config is a global arg on the
     // top-level Cli, out of the subcommand's conflicts_with reach.
     if here && config_flag.is_some() {
@@ -1472,6 +1482,9 @@ async fn cmd_init(
         None
     };
 
+    personal::prepare(&pool)?;
+    personal::configure(&mut cfg);
+
     // Mint the initial API key HERE, in the operator's terminal. Once the
     // server runs as a background service, its stdout goes to the journal
     // where nobody would see a printed key. LIFIC-9: once a human admin exists
@@ -1584,7 +1597,7 @@ async fn cmd_init(
             "signs in with the password you chose"
         };
         ui::step(format!(
-            "Administrator {} created as {} ({how})",
+            "Local operator {} created as {} ({how})",
             admin.display_name,
             ui::command(&admin.username),
         ));
@@ -1633,13 +1646,7 @@ async fn cmd_init(
         ));
     }
 
-    let open = match &created_admin {
-        Some((_, mode)) if mode.passwordless() => {
-            format!("Open {url} (the browser signs you in)")
-        }
-        Some((admin, _)) => format!("Open {url} and sign in as {}", admin.username),
-        None => format!("Open {url} and sign in"),
-    };
+    let open = format!("Open {url} — no sign-in needed");
     ui::note(
         "Next steps",
         format!(
@@ -2031,14 +2038,9 @@ mod init_target_tests {
         assert_eq!(first["admin"], serde_json::json!("blake"));
 
         // Second run with a different name must NOT create a second admin.
-        let second = run_init(
-            &dir,
-            Some("Someone Else"),
-            Some("passwords"),
-            Some("hunter22!"),
-        )
-        .await
-        .unwrap();
+        let second = run_init(&dir, Some("Someone Else"), Some("login-free"), None)
+            .await
+            .unwrap();
         assert_eq!(
             second["admin"],
             serde_json::json!("blake"),
@@ -2060,20 +2062,14 @@ mod init_target_tests {
         assert_eq!(out["web_auto_login"], serde_json::json!(true));
     }
 
-    // LIFIC-25: password mode writes required=true, leaves host unchanged,
-    // web_auto_login=false, and creates an admin with the chosen password.
     #[tokio::test]
-    async fn init_passwords_wires_config_db_and_passworded_admin() {
+    async fn init_refuses_password_mode() {
         let dir = temp_dir();
-        let out = run_init(&dir, Some("Blake"), Some("passwords"), Some("hunter22!"))
+        let error = run_init(&dir, Some("Blake"), Some("passwords"), Some("hunter22!"))
             .await
-            .unwrap();
-        assert_eq!(out["required"], serde_json::json!(true));
-        // Password mode retains the local-only default.
-        assert_eq!(out["host"], serde_json::json!("127.0.0.1"));
-        assert_eq!(out["web_auto_login"], serde_json::json!(false));
-        // Passworded admin can sign in.
-        assert_eq!(out["admin"], serde_json::json!("blake"));
+            .unwrap_err();
+        assert!(error.to_string().contains("only supports login-free"));
+        assert!(!dir.path().join("lific.toml").exists());
     }
 
     // LIFIC-25: an invalid --auth-mode is rejected.

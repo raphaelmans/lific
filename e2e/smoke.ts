@@ -8,9 +8,8 @@
  *
  *   1. spawns the lific binary against a scratch config + DB on a free port,
  *   2. seeds a user, project, issue, comment, and page via the CLI,
- *   3. signs in through the real /login page (the session cookie it sets is
- *      also what authenticates the realtime WebSocket; injecting an API key
- *      into localStorage would leave the socket handshake failing 403),
+ *   3. opens the login-free dashboard (which establishes its local browser
+ *      session and realtime WebSocket without credentials),
  *   4. drives headless Chromium through the main SPA routes,
  *   5. fails if any route renders the <svelte:boundary> fallback, logs a
  *      console error, throws an uncaught exception, or is missing content
@@ -25,7 +24,7 @@
  */
 import { chromium, type Browser } from "playwright";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -38,7 +37,6 @@ import { Database } from "bun:sqlite";
 
 const ROOT = resolve(import.meta.dir, "..");
 const BIN = process.env.LIFIC_BIN ?? join(ROOT, "target", "debug", "lific");
-const PASSWORD = "smoke-password-123";
 
 /** Routes to drive. `expect` are substrings the fully rendered page must
  * contain — content the seed data guarantees. Routes without `expect` still
@@ -103,7 +101,7 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const scratch = mkdtempSync(join(tmpdir(), "lific-smoke-"));
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "lific-smoke-")));
   const config = join(scratch, "lific.toml");
   const db = join(scratch, "smoke.db");
   let server: ChildProcess | null = null;
@@ -116,8 +114,6 @@ async function main(): Promise<number> {
     cli(config, db, [
       "init", "--no-service", "--json",
       "--name", "Smoke Operator",
-      "--auth-mode", "passwords",
-      "--password", PASSWORD,
     ]);
     cli(config, db, ["project", "create", "--name", "Demo", "--identifier", "DEMO", "--json"]);
     const seedDb = new Database(db);
@@ -146,7 +142,7 @@ async function main(): Promise<number> {
     // ---- server --------------------------------------------------------
     const port = await freePort();
     const base = `http://127.0.0.1:${port}`;
-    server = spawn(BIN, ["--config", config, "--db", db, "start", "--port", String(port), "--host", "127.0.0.1"], {
+    server = spawn(BIN, ["--config", config, "--db", db, "start", "--port", String(port)], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     server.stdout?.on("data", (d: Buffer) => (serverLog += d.toString()));
@@ -156,28 +152,15 @@ async function main(): Promise<number> {
     // ---- browser -------------------------------------------------------
     browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
     const context = await browser.newContext();
+    context.setDefaultTimeout(15_000);
 
-    // Sign in the way a person does. The login flow stores the bearer token
-    // in localStorage AND receives the `lific_token` session cookie, which is
-    // the only credential the realtime WebSocket accepts.
-    {
-      const page = await context.newPage();
-      const loginErrors: string[] = [];
-      page.on("pageerror", (err) => loginErrors.push(String(err)));
-      await page.goto(`${base}/login`, { waitUntil: "load", timeout: 15_000 });
-      await page.fill("#login-identity", "smoke-operator");
-      await page.fill("#login-password", PASSWORD);
-      await page.click("button[type=submit]");
-      await page.waitForURL(`${base}/`, { timeout: 15_000 }).catch(() => {});
-      if (!page.url().endsWith("/") || page.url().includes("/login")) {
-        const body = await page.locator("body").innerText().catch(() => "");
-        throw new Error(
-          `login did not land on the app (still at ${page.url()}). ` +
-            `Page said: ${body.slice(0, 300)}${loginErrors.length ? ` | errors: ${loginErrors.join("; ")}` : ""}`,
-        );
-      }
-      await page.close();
-    }
+    // Fonts are optional. Keep this smoke run independent of the internet.
+    await context.route("https://fonts.googleapis.com/css2**", route => route.fulfill({ contentType: "text/css", body: "" }));
+    const firstPage = await context.newPage();
+    await firstPage.goto(base);
+    await firstPage.waitForFunction(() => !!localStorage.getItem("lific_token"));
+    if (await firstPage.locator('input[type="password"]').count()) throw new Error("Personal workspace must not ask for a password");
+    await firstPage.close();
 
     for (const route of ROUTES) {
       const page = await context.newPage();
@@ -279,7 +262,7 @@ async function main(): Promise<number> {
   } catch (e) {
     failures.push(`harness error: ${e instanceof Error ? (e.stack ?? e.message) : e}`);
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) await Promise.race([browser.close().catch(() => {}), new Promise(resolve => setTimeout(resolve, 5000))]);
     if (server && !server.killed) {
       server.kill("SIGTERM");
       // Give it a moment to exit cleanly, then make sure.

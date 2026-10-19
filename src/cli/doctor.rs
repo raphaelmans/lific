@@ -189,12 +189,54 @@ pub async fn run(
     } else {
         DatabaseCheckMode::ReadOnly
     };
-    let report = build_report(resolution, database_override, key, database_mode).await;
+    let report = build_personal_report(resolution, database_override, database_mode).await;
+    let _ = key;
     print_report(&report, json);
     match report.fail_count() {
         0 => Ok(()),
         count => Err(format!("doctor: {count} check(s) failed")),
     }
+}
+
+/// The personal CLI has no remote MCP/OAuth service to diagnose.
+async fn build_personal_report(
+    resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
+    database_override: Option<&Path>,
+    database_mode: DatabaseCheckMode,
+) -> Report {
+    let config_check = check_config(&resolution);
+    let Ok(resolved) = resolution else {
+        let checks = unconfigured_checks(config_check, database_override, database_mode)
+            .into_iter()
+            .filter(|check| {
+                !matches!(
+                    check.name.as_str(),
+                    "oauth_discovery" | "mcp" | "public_url"
+                )
+            })
+            .collect();
+        return Report::new(checks);
+    };
+    let mut cfg = resolved.config;
+    if let Some(path) = database_override {
+        cfg.database.path = path.to_owned();
+    }
+    let mut checks = vec![config_check, check_database(&cfg, database_mode)];
+    checks.extend(check_backups(&cfg));
+    match crate::network::validate_server(&cfg) {
+        Err(error) => checks.push(Check::new("local_policy", Status::Fail, error)),
+        Ok(()) => {
+            if let Ok(client) = crate::network::client()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+            {
+                checks.push(server_check_result(
+                    &http_server_reachable(&client, &connect_base(&cfg)).await,
+                ));
+            }
+        }
+    }
+    Report::new(checks)
 }
 
 /// Reason attached to every check skipped because configuration selection
@@ -204,6 +246,7 @@ const CONFIG_UNRESOLVED: &str = "configuration could not be resolved; skipped";
 /// Assemble the structured report from the single configuration-selection
 /// result. This function owns doctor's fail-closed policy, so callers cannot
 /// report one resolution while checking an unrelated configuration.
+#[cfg(test)]
 async fn build_report(
     resolution: Result<crate::config::ResolvedConfig, crate::config::ConfigError>,
     database_override: Option<&Path>,
@@ -257,6 +300,7 @@ fn unconfigured_checks(
 }
 
 /// Run checks that depend on the configured server or its credentials.
+#[cfg(test)]
 async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
     if let Err(error) = crate::network::validate_server(cfg) {
         return vec![Check::new("network_policy", Status::Fail, error)];
@@ -288,6 +332,7 @@ async fn check_remote(cfg: &Config, key: Option<&str>) -> Vec<Check> {
 }
 
 /// Run the server checks sharing the local configured endpoint.
+#[cfg(test)]
 async fn check_local_remote(
     client: &reqwest::Client,
     base: &str,
@@ -307,6 +352,7 @@ async fn check_local_remote(
     checks
 }
 
+#[cfg(test)]
 async fn check_reachable_remote(
     client: &reqwest::Client,
     base: &str,
@@ -337,6 +383,7 @@ async fn check_reachable_remote(
     checks
 }
 
+#[cfg(test)]
 fn skipped_local_checks(detail: &str) -> [Check; 2] {
     [
         Check::new("oauth_discovery", Status::Skipped, detail),
@@ -739,6 +786,7 @@ fn server_check_result(probe: &ServerProbe) -> Check {
 
 /// `GET {base}/.well-known/oauth-protected-resource/mcp` → 200 + JSON with a
 /// `resource` field.
+#[cfg(test)]
 async fn check_oauth_discovery(client: &reqwest::Client, base: &str) -> Check {
     let url = format!(
         "{}/.well-known/oauth-protected-resource/mcp",
@@ -772,6 +820,7 @@ async fn check_oauth_discovery(client: &reqwest::Client, base: &str) -> Check {
     }
 }
 
+#[cfg(test)]
 fn check_oauth_discovery_body(body: serde_json::Value) -> Check {
     match body.get("resource").and_then(serde_json::Value::as_str) {
         Some(resource) => Check::new(
@@ -791,6 +840,7 @@ fn check_oauth_discovery_body(body: serde_json::Value) -> Check {
 
 /// The JSON-RPC `initialize` request body. Protocol version pinned to the one
 /// the server supports (`V_2025_03_26`).
+#[cfg(test)]
 fn initialize_body() -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -807,6 +857,7 @@ fn initialize_body() -> serde_json::Value {
 /// `POST {base}/mcp` an `initialize`. Without a key we expect a 401 carrying a
 /// `WWW-Authenticate` header (auth enforced, discovery advertised). With a key
 /// we expect a 200 whose JSON-RPC result contains `serverInfo`.
+#[cfg(test)]
 async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) -> Check {
     let response = match send_mcp_initialize(client, base, key).await {
         Ok(response) => response,
@@ -821,6 +872,7 @@ async fn check_mcp(client: &reqwest::Client, base: &str, key: Option<&str>) -> C
     }
 }
 
+#[cfg(test)]
 async fn send_mcp_initialize(
     client: &reqwest::Client,
     base: &str,
@@ -838,6 +890,7 @@ async fn send_mcp_initialize(
     req.send().await
 }
 
+#[cfg(test)]
 fn check_mcp_auth_response(response: &reqwest::Response) -> Check {
     let status = response.status();
     let has_www_auth = response
@@ -870,6 +923,7 @@ fn check_mcp_auth_response(response: &reqwest::Response) -> Check {
     }
 }
 
+#[cfg(test)]
 async fn check_mcp_authorized_response(response: reqwest::Response) -> Check {
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -898,6 +952,7 @@ async fn check_mcp_authorized_response(response: reqwest::Response) -> Check {
     }
 }
 
+#[cfg(test)]
 fn check_mcp_json_response(body: serde_json::Value) -> Check {
     if body
         .get("result")
@@ -926,6 +981,7 @@ fn check_mcp_json_response(body: serde_json::Value) -> Check {
 
 // ── Check 7: public_url ──────────────────────────────────────────────────
 
+#[cfg(test)]
 async fn check_public_url(client: &reqwest::Client, public_url: &str) -> Check {
     let url = format!(
         "{}/.well-known/oauth-protected-resource/mcp",
@@ -1817,39 +1873,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_discovery_passes_against_live_server() {
-        let pool = crate::db::open_memory().unwrap();
-        let issuer = "http://127.0.0.1:9999";
-        let app = build_test_app(pool, issuer);
-        let base = serve_ephemeral(app).await;
-
-        let c = check_oauth_discovery(&test_client(), &base).await;
-        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        // The discovery `resource` is issuer + /mcp per oauth.rs.
-        assert!(c.detail.contains("/mcp"), "detail: {}", c.detail);
-    }
-
-    #[tokio::test]
-    async fn mcp_no_key_gets_401_with_www_authenticate() {
+    async fn oauth_discovery_is_absent_from_personal_server() {
         let pool = crate::db::open_memory().unwrap();
         let app = build_test_app(pool, "http://127.0.0.1");
         let base = serve_ephemeral(app).await;
-
-        let c = check_mcp(&test_client(), &base, None).await;
-        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        assert!(c.detail.contains("auth enforced"), "detail: {}", c.detail);
+        let response = test_client()
+            .get(format!("{base}/.well-known/oauth-authorization-server"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 404);
     }
 
     #[tokio::test]
-    async fn mcp_with_real_key_completes_initialize() {
+    async fn personal_http_mcp_lists_tools_without_human_login() {
         let pool = crate::db::open_memory().unwrap();
-        let key = crate::auth::create_api_key(&pool, "doctor-test", None).unwrap();
-        let app = build_test_app(pool, "http://127.0.0.1");
+        crate::personal::prepare(&pool).unwrap();
+        let mut cfg = Config::default();
+        crate::personal::configure(&mut cfg);
+        let app = crate::server::build_app(
+            &cfg,
+            pool,
+            crate::realtime::RealtimeHub::new(),
+            Arc::from([]),
+        );
         let base = serve_ephemeral(app).await;
-
-        let c = check_mcp(&test_client(), &base, Some(&key)).await;
-        assert_eq!(c.status, Status::Pass, "detail: {}", c.detail);
-        assert!(c.detail.contains("serverInfo"), "detail: {}", c.detail);
+        let response = test_client()
+            .post(format!("{base}/mcp"))
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/list", "params":{}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(
+            body["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty())
+        );
     }
 
     #[tokio::test]
@@ -1929,7 +1991,7 @@ mod tests {
         assert_eq!(status("server"), Some(Status::Warn));
         assert_eq!(status("oauth_discovery"), Some(Status::Skipped));
         assert_eq!(status("mcp"), Some(Status::Skipped));
-        assert_eq!(status("public_url"), Some(Status::Pass));
+        assert_eq!(status("public_url"), Some(Status::Warn));
     }
 
     // ── fail-closed on a configuration failure ───────────────────────────

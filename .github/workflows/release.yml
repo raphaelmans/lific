@@ -1,10 +1,10 @@
 name: Release
 
-# Automatic upstream release publishing is disabled for this local-only fork.
-# The historical workflow is retained for review and can only be dispatched
-# explicitly against a version tag. Cargo publication is also disabled by
-# publish = false in Cargo.toml.
+# A deliberate version tag builds a fork release. Never publish under the
+# upstream crate or MCP registry identity.
 on:
+  push:
+    tags: ["v*.*.*"]
   workflow_dispatch:
 
 permissions:
@@ -301,6 +301,7 @@ jobs:
             --latest
 
   publish:
+    if: ${{ false }} # This fork does not own the upstream crates.io identity.
     needs: [verify, release]
     runs-on: ubuntu-latest
     steps:
@@ -333,6 +334,7 @@ jobs:
   # and crates.io publish have already shipped by the time we get here). If the
   # registry publish fails, re-run it manually per docs/mcp-registry.md.
   publish-registry:
+    if: ${{ false }} # Keep the upstream MCP registry identity disabled.
     needs: [verify, publish]
     runs-on: ubuntu-latest
     continue-on-error: true

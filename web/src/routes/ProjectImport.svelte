@@ -25,13 +25,13 @@
       const token = localStorage.getItem("lific_token");
       loading = true; capabilities = null; accessError = "";
       file = null; confirmed = false; validation = "";
-      if (!token) { accessError = "Sign in to import a project archive."; loading = false; return; }
+      if (!token) { accessError = "Reload the local app to import a project archive."; loading = false; return; }
       const [res, user] = await Promise.all([getArchiveCapabilities(), me()]);
       if (current !== generation || token !== localStorage.getItem("lific_token")) return;
       if (res.ok && user.ok && token) {
         restoreArchiveImport(user.data.id, token);
         capabilities = res.data;
-      } else accessError = !res.ok ? res.error : !user.ok ? user.error : "Sign in to import a project archive.";
+      } else accessError = !res.ok ? res.error : !user.ok ? user.error : "Reload the local app to import a project archive.";
       loading = false;
     }
     void initialize();
@@ -62,11 +62,11 @@
     {#if loading}
       <p role="status" class="text-body-sm text-[var(--text-muted)]">Checking archive access...</p>
     {:else if !capabilities?.can_import}
-      <p role="alert" class="text-body-sm text-[var(--text-muted)]">{accessError || "Only a signed-in instance admin can import a project archive."}</p>
+      <p role="alert" class="text-body-sm text-[var(--text-muted)]">{accessError || "The local workspace is unavailable. Reload and try again."}</p>
     {:else if archiveImport.phase === "success" && result}
       <div role="status" class="space-y-2">
         <h2 class="text-body-sm font-semibold text-[var(--text)]">{result.project.identifier} imported</h2>
-        <p class="text-body-sm text-[var(--text-muted)]">The new project is private. You are its lead. The source project is unchanged.</p>
+        <p class="text-body-sm text-[var(--text-muted)]">The project is imported into your local workspace. The archive file is unchanged.</p>
         <p class="text-body-sm text-[var(--text)]">{totalRows.toLocaleString()} {totalRows === 1 ? "record" : "records"} and {result.report.blobs.toLocaleString()} {result.report.blobs === 1 ? "file" : "files"} imported.</p>
       </div>
       <details class="text-body-sm text-[var(--text-muted)]">
@@ -98,7 +98,7 @@
       <button class="toolbar-pill" onclick={() => navigate("/settings")}>Check project list</button>
       <div><button class="text-body-sm text-[var(--text-muted)] underline" onclick={resetArchiveImport}>I've checked the project list</button></div>
     {:else}
-      <p class="text-body-sm text-[var(--text-muted)]">Create a private project from a Lific archive. You become its lead. Accounts and permissions do not transfer; imported author names are text only.</p>
+      <p class="text-body-sm text-[var(--text-muted)]">Create a local project from a Lific archive. Imported author names are kept as history.</p>
       <p class="text-body-sm text-[var(--text-muted)]">The source stays untouched. The archive's project identifier must be unused here: import never merges or overwrites a project.</p>
       <form onsubmit={submit} class="space-y-4">
         <div class="space-y-2">

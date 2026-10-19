@@ -357,6 +357,7 @@ fn interactive_picker(detected: &[DetectedClient], target: &str) -> Result<Vec<S
 ///
 /// Factored to take an injected `stdin_tty` and a picker closure so the
 /// flag/NON-tty branches are unit-testable (mirrors `resolve_clients_inner`).
+#[cfg(test)]
 pub fn resolve_transport_inner(
     stdio: bool,
     oauth: bool,
@@ -375,37 +376,6 @@ pub fn resolve_transport_inner(
         // No transport flag and not interactive → remote, the standing default.
         Ok(TransportMode::Remote)
     }
-}
-
-/// The interactive transport menu: stdio preselected, with remote and OAuth
-/// available. Does not prompt for a URL — the target URL is a server-config
-/// fact derived upstream (LIFIC-19 AC: never a connect-time prompt).
-fn interactive_transport_picker() -> Result<TransportMode, String> {
-    let mut prompt = cliclack::Select::new("How should clients connect to this Lific instance?");
-    prompt = prompt
-        .item(
-            TransportMode::Stdio,
-            "Local stdio",
-            "spawn lific --db <path> mcp; the agent carries its own token",
-        )
-        .item(
-            TransportMode::Remote,
-            "Remote (API key)",
-            "reach the running server over HTTP with a bearer key",
-        )
-        .item(
-            TransportMode::Oauth,
-            "OAuth",
-            "header-less config; the client authenticates via its native MCP OAuth flow",
-        )
-        .initial_value(TransportMode::Stdio);
-    prompt.interact().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::Interrupted {
-            "cancelled".to_string()
-        } else {
-            format!("transport selection failed: {e}")
-        }
-    })
 }
 
 /// The CLI-shown label for a resolved transport (used in the run announcement
@@ -612,9 +582,15 @@ pub fn run(
     // scripted equivalent); an interactive TTY with neither flag gets a visible
     // menu with stdio preselected. Resolving into the same `ConnectArgs` the
     // flag path would have produced guarantees the two can never diverge.
-    let transport = resolve_transport_inner(args.stdio, args.oauth, stdin_tty, || {
-        interactive_transport_picker()
-    })?;
+    // The personal CLI selects stdio or localhost HTTP explicitly. Upstream
+    // OAuth config generation remains an internal compatibility helper only.
+    let transport = if args.stdio {
+        TransportMode::Stdio
+    } else if args.oauth {
+        TransportMode::Oauth
+    } else {
+        TransportMode::Remote
+    };
     let mut args = args.clone();
     match transport {
         TransportMode::Stdio => {

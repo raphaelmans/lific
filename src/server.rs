@@ -116,17 +116,7 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
 /// sandbox win when they are already present.
 async fn add_security_headers(request: Request<Body>, next: middleware::Next) -> Response {
     let policy = browser_content_security_policy(request.uri());
-    // With no-referrer, Chromium sends Origin: null for native form posts.
-    // Keep an authenticatable Origin on local OAuth forms; same-origin still
-    // withholds the referrer from every external destination.
-    let referrer_policy = if matches!(
-        request.uri().path(),
-        "/oauth/authorize" | "/authorize" | "/oauth/device" | "/device"
-    ) {
-        "same-origin"
-    } else {
-        "no-referrer"
-    };
+    let referrer_policy = "no-referrer";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     for (name, value) in [
@@ -151,22 +141,10 @@ async fn add_security_headers(request: Request<Body>, next: middleware::Next) ->
     response
 }
 
-fn browser_content_security_policy(uri: &axum::http::Uri) -> HeaderValue {
-    let mut policy = "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'".to_owned();
-    // Chromium also checks the destination of a form's redirect. Permit the
-    // one validated loopback callback on a consent page, so local OAuth still
-    // works without allowing arbitrary form destinations throughout the app.
-    if matches!(uri.path(), "/oauth/authorize" | "/authorize")
-        && let Ok(params) = serde_urlencoded::from_str::<std::collections::HashMap<String, String>>(
-            uri.query().unwrap_or_default(),
-        )
-        && let Some(callback) = params.get("redirect_uri")
-        && let Ok(url) = crate::network::local_url(callback)
-    {
-        policy.push(' ');
-        policy.push_str(&url.origin().ascii_serialization());
-    }
-    HeaderValue::from_str(&policy).expect("policy contains only static text and a validated origin")
+fn browser_content_security_policy(_uri: &axum::http::Uri) -> HeaderValue {
+    HeaderValue::from_static(
+        "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com/css2; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com/s/; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'",
+    )
 }
 
 /// How far this instance can be reached from, as configured.
@@ -499,6 +477,7 @@ pub(crate) fn build_app_with_store(
             )
         });
 
+    let personal_pool = pool.clone();
     let app = authed_routes.merge(oauth::router(oauth_state));
     let app = match authless_mcp_router {
         Some(r) => app.merge(r),
@@ -534,6 +513,10 @@ pub(crate) fn build_app_with_store(
             // gives REST, MCP, authless MCP, OAuth, and fallback routes one
             // equivalent policy boundary instead of wrapping every API route.
             .layer(build_global_cors(&cfg.server.cors_origins))
+            .layer(middleware::from_fn_with_state(
+                personal_pool,
+                crate::personal::requests,
+            ))
             .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
             // Gzip/brotli compression for text responses. The embedded
             // frontend ships a ~1 MB JS bundle that was previously served
@@ -557,6 +540,9 @@ fn with_compression(app: Router) -> Router {
 /// shutdown signal arrives.
 pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     crate::network::validate_server(cfg)?;
+    let mut personal_cfg = cfg.clone();
+    crate::personal::configure(&mut personal_cfg);
+    let cfg = &personal_cfg;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -598,11 +584,12 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let pool = db::open(&cfg.database.path)?;
+    crate::personal::prepare(&pool)?;
     let unsupported_key_formats = auth::unsupported_api_key_format_count(&pool)?;
     if unsupported_key_formats > 0 {
         warn!(
             unsupported_key_formats,
-            "API key records with an unsupported format cannot authenticate. Check `lific key list`; rotate before reuse only for integrations that still need credentials."
+            "API key records with an unsupported format cannot authenticate. Reconnect an affected local tool with `lific connect`."
         );
     }
     info!(path = %cfg.database.path.display(), "database ready");
@@ -648,31 +635,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Auto-generate a key if none exist and no human operator exists
-    // yet (LIFIC-9: once a human exists we stop auto-minting the
-    // unbound "default" key — keys are minted on demand). The three
-    // branches are mutually exclusive by construction:
-    //   1. empty bootstrap (no human, no keys) → mint the default key
-    //   2. human present, still no keys → passwordless mode
-    //   3. keys exist → plain count
-    if auth::should_mint_initial_key(&pool) {
-        let key = auth::create_api_key(&pool, "default", None)?;
-        info!("no API keys found, auto-generated initial key");
-        print_initial_key(&key);
-    } else if !auth::has_any_keys(&pool) {
-        // A human operator exists (should_mint was false for lack of
-        // keys alone) but no key has been created yet: keys are minted
-        // on demand via `lific key create`.
-        info!(
-            "human operator present — passwordless mode; mint keys on demand with `lific key create`"
-        );
-    } else {
-        let count = auth::list_api_keys(&pool)?
-            .iter()
-            .filter(|k| !k.revoked)
-            .count();
-        info!(active_keys = count, "API key auth enabled");
-    }
+    info!("personal workspace ready — opens without signing in");
 
     backup::start_scheduler(cfg, pool.clone());
 
@@ -700,7 +663,7 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
         cfg.server.port,
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(addr = %addr, "lific server started (REST + MCP + OAuth at /mcp)");
+    info!(addr = %addr, "personal web app started (loopback only)");
     // Under the Windows service supervisor, report that the port is ours.
     crate::cli::service::windows::notify_ready();
 
@@ -712,19 +675,6 @@ pub async fn run(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     .with_graceful_shutdown(shutdown_signal(shutdown_pool));
     server.await?;
     Ok(())
-}
-
-/// Print the one-time initial API key. No box-drawing: keys are longer than
-/// any fixed-width frame (the old box rendered broken), and plain lines are
-/// easier to copy.
-fn print_initial_key(key: &str) {
-    println!();
-    println!("  Initial API key — save it now, it will not be shown again:");
-    println!();
-    println!("    {key}");
-    println!();
-    println!("  Use it as: Authorization: Bearer <key>");
-    println!();
 }
 
 /// Build the top-level CORS layer applied to the entire app.
@@ -1300,12 +1250,7 @@ mod cors_tests {
             storage::AttachmentStore::new(store_guard.path().to_path_buf()),
         );
 
-        for (uri, requested_method) in [
-            ("/api/health", "GET"),
-            ("/mcp", "POST"),
-            ("/mcp/secret", "POST"),
-            ("/not-a-route", "GET"),
-        ] {
+        for (uri, requested_method) in [("/api/health", "GET"), ("/not-a-route", "GET")] {
             let response = app
                 .clone()
                 .oneshot(
@@ -1444,18 +1389,13 @@ mod frontend_security_headers_tests {
     use tower::ServiceExt;
 
     #[test]
-    fn oauth_forms_allow_only_the_specific_loopback_callback() {
+    fn forms_remain_same_origin_even_with_an_old_oauth_url() {
         let local = browser_content_security_policy(
             &"/oauth/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A7890%2Fcallback"
                 .parse()
                 .unwrap(),
         );
-        assert!(
-            local
-                .to_str()
-                .unwrap()
-                .ends_with("form-action 'self' http://127.0.0.1:7890")
-        );
+        assert!(local.to_str().unwrap().ends_with("form-action 'self'"));
         for uri in [
             "/oauth/authorize?redirect_uri=https%3A%2F%2Fevil.example%2Fcallback",
             "/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost.evil.example%2Fcallback",
@@ -1503,7 +1443,7 @@ mod frontend_security_headers_tests {
                 .get(header::CONTENT_SECURITY_POLICY)
                 .and_then(|v| v.to_str().ok()),
             Some(
-                "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
+                "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com/css2; img-src 'self' data: blob:; font-src 'self' https://fonts.gstatic.com/s/; media-src 'self' blob:; worker-src 'self' blob:; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
             )
         );
         assert_eq!(
@@ -1696,27 +1636,16 @@ mod public_surface_tests {
     /// A visitor with no account reads the list, the detail, the comments
     /// and the file, over the production middleware stack.
     #[tokio::test]
-    async fn a_visitor_with_no_credentials_reads_a_published_project() {
+    async fn historical_publication_cannot_expose_a_project() {
         let d = deploy();
         for uri in [
-            "/public/api/projects/PUB".to_string(),
-            "/public/api/projects/PUB/index".to_string(),
-            "/public/api/projects/PUB/issues/resolve/PUB-1".to_string(),
-            format!("/public/api/projects/PUB/attachments/{}", d.attachment_id),
+            "/public/api/projects/PUB",
+            "/public/api/projects/PUB/index",
+            "/public/api/projects/PUB/issues/resolve/PUB-1",
         ] {
-            let response = anonymous(&d.app, "GET", &uri).await;
             assert_eq!(
-                response.status(),
-                StatusCode::OK,
-                "{uri} must be readable without any credential"
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::CACHE_CONTROL)
-                    .and_then(|v| v.to_str().ok()),
-                Some("no-store, no-cache, must-revalidate"),
-                "{uri} lost its no-store header somewhere in the stack"
+                anonymous(&d.app, "GET", uri).await.status(),
+                StatusCode::NOT_FOUND
             );
         }
     }
@@ -1782,7 +1711,7 @@ mod public_surface_tests {
             let response = anonymous(&d.app, method, "/public/api/projects/PUB/index").await;
             assert_eq!(
                 response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::NOT_FOUND,
                 "{method} on the public prefix"
             );
         }
@@ -1791,30 +1720,16 @@ mod public_surface_tests {
     /// The load bounds are the only thing between an anonymous stranger and
     /// the read pool, so "wired in" is asserted where the wiring happens.
     #[tokio::test]
-    async fn public_reads_are_rate_limited_in_the_assembled_app() {
+    async fn repeated_public_reads_remain_unavailable() {
         let d = deploy();
-        let mut refused = 0;
-        for _ in 0..300 {
-            if anonymous(&d.app, "GET", "/public/api/projects/PUB")
-                .await
-                .status()
-                == StatusCode::TOO_MANY_REQUESTS
-            {
-                refused += 1;
-            }
+        for _ in 0..10 {
+            assert_eq!(
+                anonymous(&d.app, "GET", "/public/api/projects/PUB")
+                    .await
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
         }
-        assert!(
-            refused > 0,
-            "300 anonymous reads in a row were all served; no rate limit is wired in"
-        );
-
-        // The authenticated API is not collateral damage: it has its own
-        // limits and must not share the public bucket.
-        assert_eq!(
-            anonymous(&d.app, "GET", "/api/projects").await.status(),
-            StatusCode::UNAUTHORIZED,
-            "the ordinary API must still answer 401, not the public 429"
-        );
     }
 
     /// `/public/PUB` is the address a person shares. It is not an API route;
@@ -1822,10 +1737,12 @@ mod public_surface_tests {
     /// the JSON endpoints above. The assertion is only that it is not a 401
     /// or a 404, the same treatment `/DEMO/issues` gets.
     #[tokio::test]
-    async fn the_shareable_address_serves_the_app_without_a_login() {
+    async fn old_shareable_addresses_are_unavailable() {
         let d = deploy();
-        let response = anonymous(&d.app, "GET", "/public/PUB").await;
-        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            anonymous(&d.app, "GET", "/public/PUB").await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }
 

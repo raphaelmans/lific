@@ -101,15 +101,7 @@ fn help_contract_exposes_the_stable_cli_surface() {
     let stdout =
         std::str::from_utf8(&assertion.get_output().stdout).expect("help must be valid UTF-8");
 
-    for command in [
-        "start",
-        "mcp",
-        "login",
-        "logout",
-        "doctor",
-        "connect",
-        "completion",
-    ] {
+    for command in ["start", "mcp", "doctor", "connect", "completion"] {
         assert!(
             stdout
                 .lines()
@@ -118,14 +110,7 @@ fn help_contract_exposes_the_stable_cli_surface() {
         );
     }
 
-    for option in [
-        "--config",
-        "--db",
-        "--json",
-        "--backend",
-        "--url",
-        "--api-key",
-    ] {
+    for option in ["--config", "--db", "--json"] {
         assert!(
             stdout.lines().any(|line| {
                 let line = line.trim_start();
@@ -247,8 +232,6 @@ fn doctor_process_contract_honors_database_override_after_config_failure() {
             db,
             "--json",
             "doctor",
-            "--key",
-            "unused-test-key",
         ])
         .assert()
         .code(1)
@@ -266,7 +249,13 @@ fn doctor_process_contract_honors_database_override_after_config_failure() {
     assert_eq!(check("config")["status"], "fail");
     assert_eq!(check("database")["status"], "pass");
     assert_eq!(check("server")["status"], "skipped");
-    assert_eq!(check("mcp")["status"], "skipped");
+    assert!(
+        !report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "mcp" || check["name"] == "oauth_discovery")
+    );
     assert!(check("database")["detail"].as_str().unwrap().contains(db));
     assert!(!tmp.path().join("lific.db").exists());
 }
@@ -324,28 +313,21 @@ fn invalid_config_never_repairs_an_implicit_database() {
 /// went through a second copy of the same parent lookup.
 #[test]
 fn init_here_creates_an_instance_in_an_empty_directory() {
-    for mode in ["passwords", "login-free"] {
-        let tmp = private_tempdir();
-        doctor_command(tmp.path())
-            .args([
-                "--json",
-                "init",
-                "--here",
-                "--no-service",
-                "--auth-mode",
-                mode,
-                "--name",
-                "Ada Lovelace",
-                "--password",
-                "init-here-contract-password",
-            ])
-            .assert()
-            .success();
-        assert!(tmp.path().join("lific.db").is_file(), "{mode}");
-        let config = std::fs::read_to_string(tmp.path().join("lific.toml")).unwrap();
-        if mode == "login-free" {
-            assert!(config.contains("host = \"127.0.0.1\""), "{config}");
-            assert!(config.contains("required = false"), "{config}");
-        }
-    }
+    let tmp = private_tempdir();
+    doctor_command(tmp.path())
+        .args([
+            "--json",
+            "init",
+            "--here",
+            "--no-service",
+            "--name",
+            "Ada Lovelace",
+        ])
+        .assert()
+        .success();
+    assert!(tmp.path().join("lific.db").is_file());
+    let config = std::fs::read_to_string(tmp.path().join("lific.toml")).unwrap();
+    assert!(config.contains("host = \"127.0.0.1\""), "{config}");
+    assert!(config.contains("required = false"), "{config}");
+    assert!(config.contains("allow_signup = false"), "{config}");
 }
